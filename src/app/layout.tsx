@@ -6,7 +6,7 @@ import { Geist } from "next/font/google";
 import { TRPCReactProvider } from "~/trpc/react";
 
 export const metadata: Metadata = {
-  title: "Thaiinno - Study Cards for your kid",
+  title: "VLHoldings - Study Cards for your kid",
   description: "Collect and organize media to send to your kid daily",
   icons: [{ rel: "icon", url: "/favicon.ico" }],
 };

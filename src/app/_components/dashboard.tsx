@@ -16,7 +16,7 @@ export function Dashboard() {
                 <Heart className="h-5 w-5 text-white" fill="white" />
               </div>
               <div>
-                <h1 className="text-xl font-bold text-gray-900">Thaiinno</h1>
+                <h1 className="text-xl font-bold text-gray-900">VLHoldings</h1>
                 <p className="text-xs text-gray-500">Study Cards for your kid</p>
               </div>
             </div>

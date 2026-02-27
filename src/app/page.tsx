@@ -105,9 +105,10 @@ export default async function Home() {
                 : [];
 
               return (
-                <article
+                <a
                   key={card.id}
-                  className="flex flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm transition hover:shadow-md"
+                  href={`/cards/${card.id}`}
+                  className="flex flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm transition hover:shadow-md hover:border-violet-300 cursor-pointer"
                 >
                   {/* Card image */}
                   {card.imageUrl && (
@@ -198,7 +199,7 @@ export default async function Home() {
                       </div>
                     </div>
                   </div>
-                </article>
+                </a>
               );
             })}
           </div>

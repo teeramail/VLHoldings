@@ -13,6 +13,8 @@ export const studyCards = createTable(
     imageUrl: d.varchar({ length: 2048 }),
     imageS3Key: d.varchar({ length: 1024 }),
     attachments: d.text(),
+    groupCalendar: d.text(),
+    expenses: d.text(),
     category: d.varchar({ length: 100 }),
     difficulty: d.varchar({ length: 20 }).default("medium"),
     tags: d.text(),
@@ -33,5 +35,30 @@ export const studyCards = createTable(
     index("study_card_completed_idx").on(t.isCompleted),
     index("study_card_created_idx").on(t.createdAt),
     index("study_card_rating_idx").on(t.rating),
+  ]
+);
+
+export const studyCardPosts = createTable(
+  "study_card_post",
+  (d) => ({
+    id: d.integer().primaryKey().generatedByDefaultAsIdentity(),
+    cardId: d
+      .integer()
+      .notNull()
+      .references(() => studyCards.id, { onDelete: "cascade" }),
+    parentPostId: d.integer(),
+    authorName: d.varchar({ length: 120 }).notNull().default("Anonymous"),
+    content: d.text().notNull(),
+    attachments: d.text(),
+    createdAt: d
+      .timestamp({ withTimezone: true })
+      .$defaultFn(() => new Date())
+      .notNull(),
+    updatedAt: d.timestamp({ withTimezone: true }).$onUpdate(() => new Date()),
+  }),
+  (t) => [
+    index("study_card_post_card_idx").on(t.cardId),
+    index("study_card_post_parent_idx").on(t.parentPostId),
+    index("study_card_post_created_idx").on(t.createdAt),
   ]
 );

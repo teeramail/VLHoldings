@@ -15,8 +15,18 @@ export const s3Client = new S3Client({
 export const BUCKET = env.AWS_S3_BUCKET;
 export const ROOT_FOLDER = env.AWS_S3_ROOT_FOLDER;
 
+function normalizeS3Segment(value: string): string {
+  return value.replace(/^\/+|\/+$|\\+/g, "").trim();
+}
+
 export function getS3Key(folderPath: string, fileName: string): string {
-  return `${ROOT_FOLDER}/${folderPath}/${fileName}`.replace(/\/+/g, "/");
+  const normalizedRoot = normalizeS3Segment(ROOT_FOLDER);
+  const normalizedFolder = normalizeS3Segment(folderPath);
+  const normalizedFileName = normalizeS3Segment(fileName);
+
+  return [normalizedRoot, normalizedFolder, normalizedFileName]
+    .filter((segment) => segment.length > 0)
+    .join("/");
 }
 
 export function getPublicUrl(key: string): string {
@@ -42,9 +52,14 @@ export async function deleteS3Object(key: string): Promise<void> {
 }
 
 export async function listS3Folder(prefix: string): Promise<string[]> {
+  const normalizedRoot = normalizeS3Segment(ROOT_FOLDER);
+  const normalizedPrefix = normalizeS3Segment(prefix);
+
   const command = new ListObjectsV2Command({
     Bucket: BUCKET,
-    Prefix: `${ROOT_FOLDER}/${prefix}`.replace(/\/+/g, "/"),
+    Prefix: [normalizedRoot, normalizedPrefix]
+      .filter((segment) => segment.length > 0)
+      .join("/"),
   });
   const response = await s3Client.send(command);
   return (response.Contents ?? []).map((item) => item.Key ?? "");

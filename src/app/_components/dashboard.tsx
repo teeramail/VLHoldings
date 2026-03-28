@@ -1,10 +1,20 @@
 "use client";
 
+import { Suspense } from "react";
 import { Heart } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { brand } from "~/config/brand";
 import { StudyCards } from "./study-cards";
 import { StatsBar } from "./stats-bar";
 
 export function Dashboard() {
+  const router = useRouter();
+
+  async function handleLogout() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    router.push("/login");
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-violet-50 via-white to-rose-50">
       {/* Header */}
@@ -16,18 +26,34 @@ export function Dashboard() {
                 <Heart className="h-5 w-5 text-white" fill="white" />
               </div>
               <div>
-                <h1 className="text-xl font-bold text-gray-900">VLHoldings</h1>
-                <p className="text-xs text-gray-500">Study Cards for your kid</p>
+                <h1 className="text-xl font-bold text-gray-900">{brand.name}</h1>
+                <p className="text-xs text-gray-500">{brand.tagline}</p>
               </div>
             </div>
-            <StatsBar />
+            <div className="flex items-center gap-3">
+              <StatsBar />
+              <button
+                onClick={handleLogout}
+                className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-gray-600 transition hover:bg-gray-100"
+              >
+                Sign Out
+              </button>
+            </div>
           </div>
         </div>
       </header>
 
       {/* Content */}
       <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-        <StudyCards />
+        <Suspense
+          fallback={
+            <div className="flex items-center justify-center py-20">
+              <div className="h-8 w-8 animate-spin rounded-full border-4 border-violet-200 border-t-violet-600" />
+            </div>
+          }
+        >
+          <StudyCards />
+        </Suspense>
       </main>
     </div>
   );

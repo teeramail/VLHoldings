@@ -4,10 +4,11 @@ import { type Metadata } from "next";
 import { Geist } from "next/font/google";
 
 import { TRPCReactProvider } from "~/trpc/react";
+import { appMetadata } from "~/config/brand";
 
 export const metadata: Metadata = {
-  title: "VLHoldings - Study Cards for your kid",
-  description: "Collect and organize media to send to your kid daily",
+  title: appMetadata.title,
+  description: appMetadata.description,
   icons: [{ rel: "icon", url: "/favicon.ico" }],
 };
 

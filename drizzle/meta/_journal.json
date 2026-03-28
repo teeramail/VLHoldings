@@ -15,6 +15,13 @@
       "when": 1771415789617,
       "tag": "0001_heavy_roxanne_simpson",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1774167440134,
+      "tag": "0002_material_giant_man",
+      "breakpoints": true
     }
   ]
 }

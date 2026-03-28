@@ -2,8 +2,11 @@ import { eq } from "drizzle-orm";
 import Image from "next/image";
 import { notFound } from "next/navigation";
 
+import { CardTabsContainer } from "~/app/_components/card-tabs-container";
 import { db } from "~/server/db";
 import { studyCards } from "~/server/db/schema";
+
+// Force fresh build: 2024-05-20-v2
 
 export const dynamic = "force-dynamic";
 
@@ -290,6 +293,8 @@ export default async function CardDetailPage({
                 </div>
               </div>
             )}
+
+            <CardTabsContainer card={card} />
 
             {/* Edit button bottom */}
             <div className="mt-8 border-t border-gray-100 pt-6">

@@ -3,6 +3,15 @@ import { PutObjectCommand } from "@aws-sdk/client-s3";
 import sharp from "sharp";
 import { s3Client, BUCKET, getS3Key, getPublicUrl } from "~/server/s3";
 
+const MAX_UPLOAD_IMAGE_BYTES = 25 * 1024 * 1024;
+const TARGET_COMPRESSED_BYTES = 450 * 1024;
+const MIN_COMPRESSED_BYTES = 300 * 1024;
+const RESIZE_STEPS = [1600, 1280, 960, 800];
+
+function toNodeBytes(input: Uint8Array<ArrayBufferLike>): Uint8Array {
+  return new Uint8Array(input);
+}
+
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
@@ -13,30 +22,54 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No file provided" }, { status: 400 });
     }
 
-    const buffer = Buffer.from(await file.arrayBuffer());
-
-    // Convert to WebP and compress to under 100KB
-    let quality = 80;
-    let webpBuffer = await sharp(buffer)
-      .resize({ width: 800, height: 600, fit: "inside", withoutEnlargement: true })
-      .webp({ quality })
-      .toBuffer();
-
-    // Iteratively reduce quality until under 100KB
-    while (webpBuffer.length > 100 * 1024 && quality > 10) {
-      quality -= 10;
-      webpBuffer = await sharp(buffer)
-        .resize({ width: 800, height: 600, fit: "inside", withoutEnlargement: true })
-        .webp({ quality })
-        .toBuffer();
+    if (!file.type.startsWith("image/")) {
+      return NextResponse.json({ error: "Only image files are allowed" }, { status: 400 });
     }
 
-    // If still over 100KB, resize smaller
-    if (webpBuffer.length > 100 * 1024) {
-      webpBuffer = await sharp(buffer)
-        .resize({ width: 400, height: 300, fit: "inside", withoutEnlargement: true })
-        .webp({ quality: 50 })
-        .toBuffer();
+    if (file.size > MAX_UPLOAD_IMAGE_BYTES) {
+      return NextResponse.json({ error: "Image is too large. Maximum size is 25 MB." }, { status: 400 });
+    }
+
+    const buffer = Buffer.from(await file.arrayBuffer());
+
+    let webpBuffer: Uint8Array<ArrayBufferLike> = new Uint8Array();
+
+    for (const width of RESIZE_STEPS) {
+      let quality = 82;
+      webpBuffer = toNodeBytes(
+        await sharp(buffer)
+          .rotate()
+          .resize({ width, height: width, fit: "inside", withoutEnlargement: true })
+          .webp({ quality, effort: 4 })
+          .toBuffer(),
+      );
+
+      while (webpBuffer.length > TARGET_COMPRESSED_BYTES && quality > 42) {
+        quality -= 8;
+        webpBuffer = toNodeBytes(
+          await sharp(buffer)
+            .rotate()
+            .resize({ width, height: width, fit: "inside", withoutEnlargement: true })
+            .webp({ quality, effort: 4 })
+            .toBuffer(),
+        );
+      }
+
+      if (webpBuffer.length <= TARGET_COMPRESSED_BYTES || width === RESIZE_STEPS[RESIZE_STEPS.length - 1]) {
+        break;
+      }
+    }
+
+    if (webpBuffer.length > TARGET_COMPRESSED_BYTES) {
+      webpBuffer = toNodeBytes(
+        await sharp(webpBuffer)
+          .webp({ quality: 40, effort: 6 })
+          .toBuffer(),
+      );
+    }
+
+    if (webpBuffer.length > MAX_UPLOAD_IMAGE_BYTES) {
+      return NextResponse.json({ error: "Compressed image is still too large" }, { status: 400 });
     }
 
     const timestamp = Date.now();
@@ -61,6 +94,8 @@ export async function POST(req: NextRequest) {
       imageUrl: publicUrl,
       originalSize: file.size,
       compressedSize: webpBuffer.length,
+      compressionSucceeded: webpBuffer.length <= TARGET_COMPRESSED_BYTES,
+      compressionFloorReached: webpBuffer.length > MIN_COMPRESSED_BYTES,
       subfolder,
     });
   } catch (error) {

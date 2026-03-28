@@ -1,5 +1,7 @@
 import { eq, desc, and, like, sql } from "drizzle-orm";
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
+import { getCardPermissions } from "~/config/card-settings";
 import { createTRPCRouter, publicProcedure } from "~/server/api/trpc";
 import { studyCards } from "~/server/db/schema";
 import { generateUploadUrl, getS3Key, getPublicUrl, deleteS3Object } from "~/server/s3";
@@ -78,6 +80,8 @@ export const studyCardsRouter = createTRPCRouter({
         imageUrl: z.string().optional(),
         imageS3Key: z.string().optional(),
         attachments: z.string().optional(),
+        groupCalendar: z.string().optional(),
+        expenses: z.string().optional(),
         category: z.string().max(100).optional(),
         difficulty: z.enum(["easy", "medium", "hard"]).default("medium"),
         tags: z.string().optional(),
@@ -97,6 +101,8 @@ export const studyCardsRouter = createTRPCRouter({
           imageUrl: input.imageUrl ?? null,
           imageS3Key: input.imageS3Key ?? null,
           attachments: input.attachments ?? null,
+          groupCalendar: input.groupCalendar ?? null,
+          expenses: input.expenses ?? null,
           category: input.category ?? null,
           difficulty: input.difficulty,
           tags: input.tags ?? null,
@@ -119,6 +125,8 @@ export const studyCardsRouter = createTRPCRouter({
         imageUrl: z.string().optional(),
         imageS3Key: z.string().optional(),
         attachments: z.string().optional(),
+        groupCalendar: z.string().optional(),
+        expenses: z.string().optional(),
         category: z.string().max(100).optional(),
         difficulty: z.enum(["easy", "medium", "hard"]).optional(),
         tags: z.string().optional(),
@@ -132,14 +140,30 @@ export const studyCardsRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const { id, ...updates } = input;
 
-      if (updates.imageS3Key) {
-        const existingCard = await ctx.db
-          .select({ imageS3Key: studyCards.imageS3Key })
-          .from(studyCards)
-          .where(eq(studyCards.id, id))
-          .limit(1);
+      const existingCard = await ctx.db
+        .select({ id: studyCards.id, title: studyCards.title, imageS3Key: studyCards.imageS3Key })
+        .from(studyCards)
+        .where(eq(studyCards.id, id))
+        .limit(1);
 
-        const previousImageKey = existingCard[0]?.imageS3Key;
+      const currentCard = existingCard[0];
+
+      if (!currentCard) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Study card not found",
+        });
+      }
+
+      if (!getCardPermissions(currentCard.title).canEditCard) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "This card is locked and cannot be edited",
+        });
+      }
+
+      if (updates.imageS3Key) {
+        const previousImageKey = currentCard.imageS3Key;
         if (previousImageKey && previousImageKey !== updates.imageS3Key) {
           await deleteS3Object(previousImageKey);
         }
@@ -162,8 +186,24 @@ export const studyCardsRouter = createTRPCRouter({
         .where(eq(studyCards.id, input.id))
         .limit(1);
 
-      if (card[0]?.imageS3Key) {
-        await deleteS3Object(card[0].imageS3Key);
+      const existingCard = card[0];
+
+      if (!existingCard) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Study card not found",
+        });
+      }
+
+      if (!getCardPermissions(existingCard.title).canDeleteCard) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "This card is locked and cannot be deleted",
+        });
+      }
+
+      if (existingCard.imageS3Key) {
+        await deleteS3Object(existingCard.imageS3Key);
       }
 
       await ctx.db.delete(studyCards).where(eq(studyCards.id, input.id));
@@ -217,6 +257,13 @@ export const studyCardsRouter = createTRPCRouter({
       .orderBy(studyCards.category);
     return result.map((r) => r.category).filter(Boolean);
   }),
+
+  deleteAttachmentFile: publicProcedure
+    .input(z.object({ s3Key: z.string().min(1) }))
+    .mutation(async ({ input }) => {
+      await deleteS3Object(input.s3Key);
+      return { success: true };
+    }),
 
   getStats: publicProcedure.query(async ({ ctx }) => {
     const totalResult = await ctx.db

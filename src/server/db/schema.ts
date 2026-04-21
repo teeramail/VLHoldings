@@ -1,6 +1,13 @@
-import { index, pgTableCreator } from "drizzle-orm/pg-core";
+import { index, pgTableCreator, timestamp } from "drizzle-orm/pg-core";
 
 export const createTable = pgTableCreator((name) => `varit_${name}`);
+
+const timestamps = {
+  createdAt: timestamp({ withTimezone: true })
+    .$defaultFn(() => new Date())
+    .notNull(),
+  updatedAt: timestamp({ withTimezone: true }).$onUpdate(() => new Date()),
+};
 
 export const studyCards = createTable(
   "study_card",
@@ -23,11 +30,7 @@ export const studyCards = createTable(
     estimatedCost: d.integer().default(0),
     notes: d.text(),
     investDate: d.date(),
-    createdAt: d
-      .timestamp({ withTimezone: true })
-      .$defaultFn(() => new Date())
-      .notNull(),
-    updatedAt: d.timestamp({ withTimezone: true }).$onUpdate(() => new Date()),
+    ...timestamps,
   }),
   (t) => [
     index("study_card_category_idx").on(t.category),
@@ -50,15 +53,32 @@ export const studyCardPosts = createTable(
     authorName: d.varchar({ length: 120 }).notNull().default("Anonymous"),
     content: d.text().notNull(),
     attachments: d.text(),
-    createdAt: d
-      .timestamp({ withTimezone: true })
-      .$defaultFn(() => new Date())
-      .notNull(),
-    updatedAt: d.timestamp({ withTimezone: true }).$onUpdate(() => new Date()),
+    ...timestamps,
   }),
   (t) => [
     index("study_card_post_card_idx").on(t.cardId),
     index("study_card_post_parent_idx").on(t.parentPostId),
     index("study_card_post_created_idx").on(t.createdAt),
+  ]
+);
+
+export const studyCardItems = createTable(
+  "study_card_item",
+  (d) => ({
+    id: d.integer().primaryKey().generatedByDefaultAsIdentity(),
+    cardId: d
+      .integer()
+      .notNull()
+      .references(() => studyCards.id, { onDelete: "cascade" }),
+    nameTitle: d.text().notNull(),
+    linkUrl: d.varchar({ length: 2048 }),
+    value: d.integer().default(0).notNull(),
+    itemDate: d.date(),
+    media: d.text(),
+    ...timestamps,
+  }),
+  (t) => [
+    index("study_card_item_card_idx").on(t.cardId),
+    index("study_card_item_created_idx").on(t.createdAt),
   ]
 );

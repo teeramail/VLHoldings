@@ -155,7 +155,15 @@ export const studyCardsRouter = createTRPCRouter({
         });
       }
 
-      if (!getCardPermissions(currentCard.title).canEditCard) {
+      const permissions = getCardPermissions(currentCard.title);
+      const updateKeys = Object.keys(updates);
+      const isCalendarOnlyUpdate = updateKeys.length > 0 && updateKeys.every((key) => key === "groupCalendar");
+      const isExpenseOnlyUpdate = updateKeys.length > 0 && updateKeys.every((key) => key === "expenses");
+      const isAllowedLockedCardUpdate =
+        (isCalendarOnlyUpdate && permissions.canAddCalendar) ||
+        (isExpenseOnlyUpdate && permissions.canAddExpense);
+
+      if (!permissions.canEditCard && !isAllowedLockedCardUpdate) {
         throw new TRPCError({
           code: "FORBIDDEN",
           message: "This card is locked and cannot be edited",

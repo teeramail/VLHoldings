@@ -16,6 +16,7 @@ export const env = createEnv({
     VALID_EMAIL: z.string().optional(),
     VALID_PASSWORD: z.string().optional(),
     PRESIDENT_API_KEY: z.string().optional(),
+    CARDX_EXPORT_API_KEY: z.string().optional(),
   },
 
   client: {},
@@ -32,6 +33,7 @@ export const env = createEnv({
     VALID_EMAIL: process.env.VALID_EMAIL,
     VALID_PASSWORD: process.env.VALID_PASSWORD,
     PRESIDENT_API_KEY: process.env.PRESIDENT_API_KEY,
+    CARDX_EXPORT_API_KEY: process.env.CARDX_EXPORT_API_KEY,
   },
 
   skipValidation: !!process.env.SKIP_ENV_VALIDATION,

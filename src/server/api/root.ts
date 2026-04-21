@@ -1,3 +1,4 @@
+import { studyCardItemsRouter } from "~/server/api/routers/study-card-items";
 import { studyCardPostsRouter } from "~/server/api/routers/study-card-posts";
 import { studyCardsRouter } from "~/server/api/routers/study-cards";
 import { createCallerFactory, createTRPCRouter } from "~/server/api/trpc";
@@ -8,6 +9,7 @@ import { createCallerFactory, createTRPCRouter } from "~/server/api/trpc";
  * All routers added in /api/routers should be manually added here.
  */
 export const appRouter = createTRPCRouter({
+  studyCardItems: studyCardItemsRouter,
   studyCardPosts: studyCardPostsRouter,
   studyCards: studyCardsRouter,
 });

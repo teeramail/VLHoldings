@@ -1725,7 +1725,7 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-async function compressCardImage(file: File): Promise<File> {
+export async function compressCardImage(file: File): Promise<File> {
   if (!file.type.startsWith("image/")) {
     throw new Error("Only image files are allowed.");
   }

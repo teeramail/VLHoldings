@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { env } from "~/env";
 
@@ -30,7 +30,10 @@ export function getS3Key(folderPath: string, fileName: string): string {
 }
 
 export function getPublicUrl(key: string): string {
-  return `${env.AWS_ENDPOINT}/${BUCKET}/${key}`;
+  const endpoint = env.AWS_ENDPOINT.startsWith("http://") || env.AWS_ENDPOINT.startsWith("https://")
+    ? env.AWS_ENDPOINT
+    : `https://${env.AWS_ENDPOINT}`;
+  return `${endpoint}/${BUCKET}/${key}`;
 }
 
 export async function generateUploadUrl(key: string, contentType: string): Promise<string> {
@@ -39,6 +42,14 @@ export async function generateUploadUrl(key: string, contentType: string): Promi
     Key: key,
     ContentType: contentType,
     ACL: "public-read",
+  });
+  return getSignedUrl(s3Client, command, { expiresIn: 3600 });
+}
+
+export async function generateDownloadUrl(key: string): Promise<string> {
+  const command = new GetObjectCommand({
+    Bucket: BUCKET,
+    Key: key,
   });
   return getSignedUrl(s3Client, command, { expiresIn: 3600 });
 }

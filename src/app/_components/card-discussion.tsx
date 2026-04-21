@@ -286,6 +286,7 @@ function PostComposer({
 
 export function CardDiscussion({ cardId, hideHeader = false }: { cardId: number; hideHeader?: boolean }) {
   const [replyTargetId, setReplyTargetId] = useState<number | null>(null);
+  const [expandedPostId, setExpandedPostId] = useState<number | null>(null);
   const utils = api.useUtils();
 
   const postsQuery = api.studyCardPosts.listByCardId.useQuery({ cardId });
@@ -303,6 +304,9 @@ export function CardDiscussion({ cardId, hideHeader = false }: { cardId: number;
   });
 
   const posts = postsQuery.data ?? [];
+  const sortedPosts = [...posts].sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+  );
 
   const handleCreatePost = async (payload: ComposerPayload) => {
     await createPostMutation.mutateAsync({ cardId, ...payload });
@@ -322,69 +326,85 @@ export function CardDiscussion({ cardId, hideHeader = false }: { cardId: number;
         </div>
       )}
 
-      <PostComposer
-        onSubmit={handleCreatePost}
-        isSubmitting={createPostMutation.isPending}
-        submitLabel="Post"
-        placeholder="Write a post about this card..."
-      />
-
       {postsQuery.isLoading ? (
         <p className="text-sm text-gray-500">Loading posts...</p>
-      ) : posts.length === 0 ? (
+      ) : sortedPosts.length === 0 ? (
         <p className="rounded-lg border border-dashed border-gray-300 p-4 text-sm text-gray-500">
           No posts yet. Start the conversation for this card.
         </p>
       ) : (
         <div className="space-y-4">
-          {posts.map((post) => {
+          {sortedPosts.map((post) => {
             const attachments = parseAttachments(post.attachments);
+            const topic = post.content
+              .split(/\r?\n/)
+              .map((line) => line.trim())
+              .find(Boolean) ?? "Untitled topic";
+            const isExpanded = expandedPostId === post.id;
             return (
               <article key={post.id} className="rounded-xl border border-gray-200 p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-sm font-semibold text-gray-800">{post.authorName}</p>
-                  <p className="text-xs text-gray-400">{new Date(post.createdAt).toLocaleString()}</p>
-                </div>
-                <p className="mt-2 whitespace-pre-wrap text-sm text-gray-700">{post.content}</p>
-                <AttachmentList attachments={attachments} />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const isClosing = expandedPostId === post.id;
+                    setExpandedPostId(isClosing ? null : post.id);
+                    if (isClosing || replyTargetId !== post.id) {
+                      setReplyTargetId(null);
+                    }
+                  }}
+                  className="w-full rounded-md px-1 py-1 text-left text-sm font-semibold text-gray-900 hover:bg-gray-50"
+                >
+                  {topic}
+                </button>
 
-                <div className="mt-3 flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setReplyTargetId((current) => (current === post.id ? null : post.id))}
-                    className="rounded-md border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
-                  >
-                    {replyTargetId === post.id ? "Hide answer form" : "Answer"}
-                  </button>
-                </div>
+                {isExpanded && (
+                  <div className="mt-3 space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-semibold text-gray-800">{post.authorName}</p>
+                      <p className="text-xs text-gray-400">{new Date(post.createdAt).toLocaleString()}</p>
+                    </div>
+                    <p className="whitespace-pre-wrap text-sm text-gray-700">{post.content}</p>
+                    <AttachmentList attachments={attachments} />
 
-                {replyTargetId === post.id && (
-                  <div className="mt-3">
-                    <PostComposer
-                      onSubmit={async (payload) => handleAnswerPost(post.id, payload)}
-                      isSubmitting={answerPostMutation.isPending}
-                      submitLabel="Post answer"
-                      placeholder="Write your answer..."
-                      onCancel={() => setReplyTargetId(null)}
-                    />
-                  </div>
-                )}
+                    <div className="mt-3 flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setReplyTargetId((current) => (current === post.id ? null : post.id))}
+                        className="rounded-md border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                      >
+                        {replyTargetId === post.id ? "Hide reply form" : "Reply"}
+                      </button>
+                    </div>
 
-                {post.replies.length > 0 && (
-                  <div className="mt-4 space-y-3 border-l-2 border-violet-100 pl-4">
-                    {post.replies.map((reply) => {
-                      const replyAttachments = parseAttachments(reply.attachments);
-                      return (
-                        <div key={reply.id} className="rounded-lg border border-gray-100 bg-gray-50 p-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <p className="text-sm font-semibold text-gray-800">{reply.authorName}</p>
-                            <p className="text-xs text-gray-400">{new Date(reply.createdAt).toLocaleString()}</p>
-                          </div>
-                          <p className="mt-2 whitespace-pre-wrap text-sm text-gray-700">{reply.content}</p>
-                          <AttachmentList attachments={replyAttachments} />
-                        </div>
-                      );
-                    })}
+                    {replyTargetId === post.id && (
+                      <div className="mt-3">
+                        <PostComposer
+                          onSubmit={async (payload) => handleAnswerPost(post.id, payload)}
+                          isSubmitting={answerPostMutation.isPending}
+                          submitLabel="Post reply"
+                          placeholder="Write your reply..."
+                          onCancel={() => setReplyTargetId(null)}
+                        />
+                      </div>
+                    )}
+
+                    {post.replies.length > 0 && (
+                      <div className="mt-4 space-y-3 border-l-2 border-violet-100 pl-4">
+                        {post.replies.map((reply) => {
+                          const replyAttachments = parseAttachments(reply.attachments);
+                          return (
+                            <div key={reply.id} className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                              <div className="flex items-center justify-between gap-3">
+                                <p className="text-sm font-semibold text-gray-800">{reply.authorName}</p>
+                                <p className="text-xs text-gray-400">{new Date(reply.createdAt).toLocaleString()}</p>
+                              </div>
+                              <p className="mt-2 whitespace-pre-wrap text-sm text-gray-700">{reply.content}</p>
+                              <AttachmentList attachments={replyAttachments} />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
               </article>
@@ -392,6 +412,13 @@ export function CardDiscussion({ cardId, hideHeader = false }: { cardId: number;
           })}
         </div>
       )}
+
+      <PostComposer
+        onSubmit={handleCreatePost}
+        isSubmitting={createPostMutation.isPending}
+        submitLabel="Post"
+        placeholder="Write a post about this card..."
+      />
     </div>
   );
 

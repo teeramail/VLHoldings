@@ -8,10 +8,6 @@ const TARGET_COMPRESSED_BYTES = 450 * 1024;
 const MIN_COMPRESSED_BYTES = 300 * 1024;
 const RESIZE_STEPS = [1600, 1280, 960, 800];
 
-function toNodeBytes(input: Uint8Array<ArrayBufferLike>): Uint8Array {
-  return new Uint8Array(input);
-}
-
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
@@ -31,28 +27,25 @@ export async function POST(req: NextRequest) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
+    const source = sharp(buffer).rotate();
 
-    let webpBuffer: Uint8Array<ArrayBufferLike> = new Uint8Array();
+    let webpBuffer: Buffer = Buffer.alloc(0);
 
     for (const width of RESIZE_STEPS) {
       let quality = 82;
-      webpBuffer = toNodeBytes(
-        await sharp(buffer)
-          .rotate()
-          .resize({ width, height: width, fit: "inside", withoutEnlargement: true })
-          .webp({ quality, effort: 4 })
-          .toBuffer(),
-      );
+      webpBuffer = await source
+        .clone()
+        .resize({ width, height: width, fit: "inside", withoutEnlargement: true })
+        .webp({ quality, effort: 4 })
+        .toBuffer();
 
       while (webpBuffer.length > TARGET_COMPRESSED_BYTES && quality > 42) {
         quality -= 8;
-        webpBuffer = toNodeBytes(
-          await sharp(buffer)
-            .rotate()
-            .resize({ width, height: width, fit: "inside", withoutEnlargement: true })
-            .webp({ quality, effort: 4 })
-            .toBuffer(),
-        );
+        webpBuffer = await source
+          .clone()
+          .resize({ width, height: width, fit: "inside", withoutEnlargement: true })
+          .webp({ quality, effort: 4 })
+          .toBuffer();
       }
 
       if (webpBuffer.length <= TARGET_COMPRESSED_BYTES || width === RESIZE_STEPS[RESIZE_STEPS.length - 1]) {
@@ -61,11 +54,9 @@ export async function POST(req: NextRequest) {
     }
 
     if (webpBuffer.length > TARGET_COMPRESSED_BYTES) {
-      webpBuffer = toNodeBytes(
-        await sharp(webpBuffer)
-          .webp({ quality: 40, effort: 6 })
-          .toBuffer(),
-      );
+      webpBuffer = await sharp(webpBuffer)
+        .webp({ quality: 40, effort: 6 })
+        .toBuffer();
     }
 
     if (webpBuffer.length > MAX_UPLOAD_IMAGE_BYTES) {

@@ -1,5 +1,5 @@
 import { TRPCError } from "@trpc/server";
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import { z } from "zod";
 
 import { createTRPCRouter, publicProcedure } from "~/server/api/trpc";
@@ -16,25 +16,24 @@ export const studyCardPostsRouter = createTRPCRouter({
   listByCardId: publicProcedure
     .input(z.object({ cardId: z.number().int().positive() }))
     .query(async ({ ctx, input }) => {
-      const topLevelPosts = await ctx.db
-        .select()
-        .from(studyCardPosts)
-        .where(
-          and(
-            eq(studyCardPosts.cardId, input.cardId),
-            isNull(studyCardPosts.parentPostId),
-          ),
-        )
-        .orderBy(asc(studyCardPosts.createdAt), asc(studyCardPosts.id));
-
-      const replies = await ctx.db
-        .select()
+      const allPosts = await ctx.db
+        .select({
+          id: studyCardPosts.id,
+          cardId: studyCardPosts.cardId,
+          parentPostId: studyCardPosts.parentPostId,
+          authorName: studyCardPosts.authorName,
+          content: studyCardPosts.content,
+          attachments: studyCardPosts.attachments,
+          createdAt: studyCardPosts.createdAt,
+        })
         .from(studyCardPosts)
         .where(eq(studyCardPosts.cardId, input.cardId))
         .orderBy(asc(studyCardPosts.createdAt), asc(studyCardPosts.id));
 
-      const repliesByParent = new Map<number, typeof replies>();
-      for (const post of replies) {
+      const topLevelPosts = allPosts.filter(p => !p.parentPostId);
+      const repliesByParent = new Map<number, typeof allPosts>();
+
+      for (const post of allPosts) {
         if (!post.parentPostId) continue;
         const existing = repliesByParent.get(post.parentPostId) ?? [];
         existing.push(post);

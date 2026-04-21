@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "~/server/db";
 import { studyCards } from "~/server/db/schema";
-import { desc, eq, and, like, sql } from "drizzle-orm";
+import { desc, eq, and, sql } from "drizzle-orm";
 import { env } from "~/env";
 
 /**
@@ -16,7 +16,6 @@ import { env } from "~/env";
  *   - search: search in title/description
  */
 export async function GET(request: Request) {
-  // --- API Key Authentication ---
   const apiKey = env.PRESIDENT_API_KEY;
   if (apiKey) {
     const authHeader = request.headers.get("authorization");
@@ -49,29 +48,40 @@ export async function GET(request: Request) {
       );
     }
 
-    const cards = await db
-      .select()
-      .from(studyCards)
-      .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(desc(studyCards.createdAt))
-      .limit(limit);
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
-    // Get categories list
-    const categoriesResult = await db
-      .select({ category: studyCards.category })
-      .from(studyCards)
-      .where(sql`${studyCards.category} IS NOT NULL`)
-      .groupBy(studyCards.category)
-      .orderBy(studyCards.category);
+    const [cards, categoriesResult, totalResult] = await Promise.all([
+      db
+        .select({
+          id: studyCards.id,
+          title: studyCards.title,
+          description: studyCards.description,
+          category: studyCards.category,
+          difficulty: studyCards.difficulty,
+          isCompleted: studyCards.isCompleted,
+          imageUrl: studyCards.imageUrl,
+          createdAt: studyCards.createdAt,
+        })
+        .from(studyCards)
+        .where(whereClause)
+        .orderBy(desc(studyCards.createdAt))
+        .limit(limit),
+
+      db
+        .select({ category: studyCards.category })
+        .from(studyCards)
+        .where(sql`${studyCards.category} IS NOT NULL`)
+        .groupBy(studyCards.category)
+        .orderBy(studyCards.category),
+
+      db
+        .select({ count: sql<number>`count(*)` })
+        .from(studyCards),
+    ]);
 
     const categories = categoriesResult
       .map((r) => r.category)
       .filter(Boolean);
-
-    // Get stats
-    const totalResult = await db
-      .select({ count: sql<number>`count(*)` })
-      .from(studyCards);
 
     return NextResponse.json({
       cards,

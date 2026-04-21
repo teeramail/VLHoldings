@@ -3,6 +3,7 @@ import Image from "next/image";
 import { notFound } from "next/navigation";
 
 import { CardTabsContainer } from "~/app/_components/card-tabs-container";
+import { DeleteCardButton } from "~/app/_components/delete-card-button";
 import { db } from "~/server/db";
 import { studyCards } from "~/server/db/schema";
 
@@ -50,6 +51,20 @@ function formatFileSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function getCardNoteText(rawNotes: string | null | undefined) {
+  if (!rawNotes) return "";
+
+  try {
+    const parsed = JSON.parse(rawNotes) as { version?: number; text?: string };
+    if (parsed?.version === 1) {
+      return parsed.text ?? "";
+    }
+  } catch {
+  }
+
+  return rawNotes;
+}
+
 export default async function CardDetailPage({
   params,
 }: {
@@ -93,6 +108,7 @@ export default async function CardDetailPage({
   const fileAttachments = parsedAttachments.filter((a) => a.kind !== "card-image");
   const embedUrl = card.youtubeUrl ? getYoutubeEmbedUrl(card.youtubeUrl) : null;
   const tags = card.tags ? card.tags.split(",").map((t) => t.trim()).filter(Boolean) : [];
+  const noteText = getCardNoteText(card.notes);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-violet-50 via-white to-rose-50">
@@ -265,10 +281,10 @@ export default async function CardDetailPage({
             )}
 
             {/* Notes */}
-            {card.notes && (
+            {noteText && (
               <div className="mt-5 rounded-lg bg-amber-50 p-4 text-sm text-amber-800">
                 <p className="mb-1 font-medium">Notes</p>
-                {card.notes}
+                {noteText}
               </div>
             )}
 
@@ -296,14 +312,15 @@ export default async function CardDetailPage({
 
             <CardTabsContainer card={card} />
 
-            {/* Edit button bottom */}
-            <div className="mt-8 border-t border-gray-100 pt-6">
+            {/* Action buttons */}
+            <div className="mt-8 flex flex-wrap items-center gap-3 border-t border-gray-100 pt-6">
               <a
                 href="/dashboard"
                 className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-violet-700"
               >
                 Edit this card in Dashboard
               </a>
+              <DeleteCardButton cardId={card.id} cardTitle={card.title} />
             </div>
           </div>
         </div>

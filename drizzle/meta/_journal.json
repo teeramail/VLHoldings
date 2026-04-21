@@ -22,6 +22,20 @@
       "when": 1774167440134,
       "tag": "0002_material_giant_man",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1776747657324,
+      "tag": "0003_merged_aaateera",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1776747700000,
+      "tag": "0004_search_trgm_index",
+      "breakpoints": true
     }
   ]
 }

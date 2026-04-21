@@ -1,7 +1,6 @@
 "use client";
 
-import { useState } from "react";
-import Image from "next/image";
+import React, { useState, useMemo, useCallback } from "react";
 import { compressCardImage } from "./study-cards";
 import {
   Calendar,
@@ -16,6 +15,9 @@ import {
   Loader2,
   ChevronLeft,
   ChevronRight,
+  Download,
+  Archive,
+  Search,
 } from "lucide-react";
 import { format } from "date-fns";
 import { toZonedTime } from "date-fns-tz";
@@ -48,6 +50,7 @@ type CardItemRow = {
   id: number;
   cardId: number;
   nameTitle: string;
+  description: string | null;
   linkUrl: string | null;
   value: number;
   itemDate: string | null;
@@ -146,13 +149,13 @@ function serializeCardNotes(text: string, noteTable: NoteTableData) {
 }
 
 export function CardTabsContainer({ card }: CardTabsContainerProps) {
-  const parsedNotes = parseCardNotes(card.notes);
+  const parsedNotes = useMemo(() => parseCardNotes(card.notes), [card.notes]);
   const [activeTab, setActiveTab] = useState<"item" | "discussion" | "calendar" | "expense" | "note">("item");
   const [savingTab, setSavingTab] = useState<"calendar" | "expense" | "item" | "note" | null>(null);
-  const permissions = getCardPermissions(card.title);
+  const permissions = useMemo(() => getCardPermissions(card.title), [card.title]);
 
   // Use a key to force re-render on card change
-  const containerKey = `card-tabs-${card.id}`;
+  const containerKey = useMemo(() => `card-tabs-${card.id}`, [card.id]);
 
   // ... (rest of the state and handlers)
   const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>(() => {
@@ -183,11 +186,26 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
   const [expensePage, setExpensePage] = useState(1);
   const EXPENSE_PAGE_SIZE = 20;
   const [newItemNameTitle, setNewItemNameTitle] = useState("");
+  const [newItemDescription, setNewItemDescription] = useState("");
   const [newItemLinkUrl, setNewItemLinkUrl] = useState("");
   const [newItemValue, setNewItemValue] = useState<number | "">("");
   const [newItemDate, setNewItemDate] = useState("");
   const [newItemMedia, setNewItemMedia] = useState<ItemMedia | null>(null);
+  const [editingItemId, setEditingItemId] = useState<number | null>(null);
+  const [editingItemNameTitle, setEditingItemNameTitle] = useState("");
+  const [editingItemDescription, setEditingItemDescription] = useState("");
+  const [editingItemLinkUrl, setEditingItemLinkUrl] = useState("");
+  const [editingItemValue, setEditingItemValue] = useState<number | "">("");
+  const [editingItemDate, setEditingItemDate] = useState("");
+  const [editingItemMedia, setEditingItemMedia] = useState<ItemMedia | null>(null);
+  const [editingItemMediaDirty, setEditingItemMediaDirty] = useState(false);
+  const [viewingItemIndex, setViewingItemIndex] = useState<number | null>(null);
+  const [itemSearch, setItemSearch] = useState("");
+  const [itemPage, setItemPage] = useState(1);
+  const ITEM_PAGE_SIZE = 10;
+  const [expandedDescriptions, setExpandedDescriptions] = useState<Set<number>>(() => new Set());
   const [itemMediaUploading, setItemMediaUploading] = useState(false);
+  const [itemMediaPasteMode, setItemMediaPasteMode] = useState(false);
   const [noteTable, setNoteTable] = useState<NoteTableData>(() => parsedNotes.noteTable);
 
   const utils = api.useUtils();
@@ -202,15 +220,43 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
       void utils.studyCardItems.listByCardId.invalidate({ cardId: card.id });
     },
   });
+  const updateItemMutation = api.studyCardItems.update.useMutation({
+    onSuccess: () => {
+      void utils.studyCardItems.listByCardId.invalidate({ cardId: card.id });
+    },
+  });
   const deleteItemMutation = api.studyCardItems.delete.useMutation({
     onSuccess: () => {
       void utils.studyCardItems.listByCardId.invalidate({ cardId: card.id });
     },
   });
   const itemRows = (itemRowsQuery.data ?? []) as CardItemRow[];
-  const itemTotalValue = itemRows.reduce((sum, row) => sum + row.value, 0);
+  const itemTotalValue = useMemo(() => itemRows.reduce((sum, row) => sum + row.value, 0), [itemRows]);
+  const filteredItemRows = useMemo(() => {
+    const q = itemSearch.trim().toLowerCase();
+    if (!q) return itemRows;
+    return itemRows.filter((row) => {
+      const haystack = [
+        row.nameTitle,
+        row.description ?? "",
+        row.linkUrl ?? "",
+        row.itemDate ?? "",
+        String(row.value),
+        row.media?.originalName ?? "",
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [itemRows, itemSearch]);
+  const itemTotalPages = Math.max(1, Math.ceil(filteredItemRows.length / ITEM_PAGE_SIZE));
+  const effectiveItemPage = Math.min(itemPage, itemTotalPages);
+  const paginatedItemRows = useMemo(() => {
+    const start = (effectiveItemPage - 1) * ITEM_PAGE_SIZE;
+    return filteredItemRows.slice(start, start + ITEM_PAGE_SIZE);
+  }, [filteredItemRows, effectiveItemPage]);
 
-  const saveCalendarEvents = async (events: CalendarEvent[]) => {
+  const saveCalendarEvents = useCallback(async (events: CalendarEvent[]) => {
     if (!permissions.canAddCalendar) return;
     setSavingTab("calendar");
     try {
@@ -221,9 +267,9 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
     } finally {
       setSavingTab(null);
     }
-  };
+  }, [card.id, permissions.canAddCalendar, updateCard]);
 
-  const addCalendarEvent = () => {
+  const addCalendarEvent = useCallback(() => {
     if (!permissions.canAddCalendar) return;
     if (!newEventDate || !newEventNote.trim()) return;
     const newEvent: CalendarEvent = {
@@ -242,17 +288,17 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
     setNewEventDate("");
     setNewEventTime("");
     setNewEventNote("");
-  };
+  }, [calendarEvents, newEventDate, newEventNote, newEventTime, permissions.canAddCalendar, saveCalendarEvents]);
 
-  const deleteCalendarEvent = (id: string) => {
+  const deleteCalendarEvent = useCallback((id: string) => {
     if (!permissions.canDeleteCalendar) return;
     if (!confirm("Delete this event?")) return;
     const updatedEvents = calendarEvents.filter((e) => e.id !== id);
     setCalendarEvents(updatedEvents);
     void saveCalendarEvents(updatedEvents);
-  };
+  }, [calendarEvents, permissions.canDeleteCalendar, saveCalendarEvents]);
 
-  const updateCalendarEvent = (id: string, updates: Partial<CalendarEvent>) => {
+  const updateCalendarEvent = useCallback((id: string, updates: Partial<CalendarEvent>) => {
     if (!permissions.canEditCalendar) return;
     const updatedEvents = calendarEvents
       .map((e) => (e.id === id ? { ...e, ...updates } : e))
@@ -264,9 +310,9 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
     setCalendarEvents(updatedEvents);
     void saveCalendarEvents(updatedEvents);
     setEditingEventId(null);
-  };
+  }, [calendarEvents, permissions.canEditCalendar, saveCalendarEvents]);
 
-  const saveExpenseItems = async (items: ExpenseItem[]) => {
+  const saveExpenseItems = useCallback(async (items: ExpenseItem[]) => {
     if (!permissions.canAddExpense) return;
     setSavingTab("expense");
     try {
@@ -277,9 +323,9 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
     } finally {
       setSavingTab(null);
     }
-  };
+  }, [card.id, permissions.canAddExpense, updateCard]);
 
-  const addExpenseItem = () => {
+  const addExpenseItem = useCallback(() => {
     if (!permissions.canAddExpense) return;
     if (!newExpenseItem.trim() || newExpenseAmount === "" || !newExpenseDate) return;
     const newItem: ExpenseItem = {
@@ -297,17 +343,17 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
     setNewExpenseAmount("");
     setNewExpenseDate("");
     setNewExpenseNote("");
-  };
+  }, [expenseItems, newExpenseAmount, newExpenseDate, newExpenseItem, newExpenseNote, permissions.canAddExpense, saveExpenseItems]);
 
-  const deleteExpenseItem = (id: string) => {
+  const deleteExpenseItem = useCallback((id: string) => {
     if (!permissions.canDeleteExpense) return;
     if (!confirm("Delete this expense?")) return;
     const updatedItems = expenseItems.filter((e) => e.id !== id);
     setExpenseItems(updatedItems);
     void saveExpenseItems(updatedItems);
-  };
+  }, [expenseItems, permissions.canDeleteExpense, saveExpenseItems]);
 
-  const updateExpenseItem = (id: string, updates: Partial<ExpenseItem>) => {
+  const updateExpenseItem = useCallback((id: string, updates: Partial<ExpenseItem>) => {
     if (!permissions.canEditExpense) return;
     const updatedItems = expenseItems
       .map((e) => (e.id === id ? { ...e, ...updates } : e))
@@ -315,9 +361,9 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
     setExpenseItems(updatedItems);
     void saveExpenseItems(updatedItems);
     setEditingExpenseId(null);
-  };
+  }, [expenseItems, permissions.canEditExpense, saveExpenseItems]);
 
-  const saveNoteTable = async (nextNoteTable: NoteTableData) => {
+  const saveNoteTable = useCallback(async (nextNoteTable: NoteTableData) => {
     if (!permissions.canEditCard) return;
     setSavingTab("note");
     try {
@@ -328,9 +374,9 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
     } finally {
       setSavingTab(null);
     }
-  };
+  }, [card.id, parsedNotes.text, permissions.canEditCard, updateCard]);
 
-  const updateNoteColumnCount = (columnCount: number) => {
+  const updateNoteColumnCount = useCallback((columnCount: number) => {
     if (!permissions.canEditCard) return;
     const nextNoteTable = normalizeNoteTable({
       columnCount,
@@ -339,9 +385,9 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
     });
     setNoteTable(nextNoteTable);
     void saveNoteTable(nextNoteTable);
-  };
+  }, [noteTable.columnWidths, noteTable.rows, permissions.canEditCard, saveNoteTable]);
 
-  const uploadItemMedia = async (file: File): Promise<ItemMedia | null> => {
+  const uploadItemMedia = useCallback(async (file: File): Promise<ItemMedia | null> => {
     setItemMediaUploading(true);
     try {
       const isImage = file.type.startsWith("image/");
@@ -359,11 +405,14 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
         }
       }
 
+      const extension = finalContentType === "image/webp" ? "webp" : "bin";
+      const uploadFileName = finalFile.name || file.name || `upload-${Date.now()}.${extension}`;
+
       const presignRes = await fetch("/api/presign-attachment", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          fileName: file.name,
+          fileName: uploadFileName,
           contentType: finalContentType,
           fileSize: finalFile.size,
           subfolder: "study-cards/items",
@@ -379,7 +428,7 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
       const uploadRes = await fetch(presignData.uploadUrl, {
         method: "PUT",
         body: finalFile,
-        headers: { "Content-Type": finalContentType },
+        headers: { "Content-Type": finalContentType, "x-amz-acl": "public-read" },
       });
 
       if (!uploadRes.ok) {
@@ -402,19 +451,114 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
     } finally {
       setItemMediaUploading(false);
     }
-  };
+  }, []);
 
-  const handleItemMediaChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleItemMediaChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    
+    if (file.size > 10 * 1024 * 1024) {
+      alert("File size exceeds 10 MB limit");
+      e.target.value = "";
+      return;
+    }
+    
     const uploaded = await uploadItemMedia(file);
     if (uploaded) {
       setNewItemMedia(uploaded);
     }
     e.target.value = "";
-  };
+  }, [uploadItemMedia]);
 
-  const addItemRow = async () => {
+  const handleItemMediaPaste = useCallback(async (e: ClipboardEvent) => {
+    if (!itemMediaPasteMode) return;
+    
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    for (const item of Array.from(items)) {
+      if (item.kind === "file") {
+        const file = item.getAsFile();
+        if (file) {
+          if (file.size > 10 * 1024 * 1024) {
+            alert("File size exceeds 10 MB limit");
+            setItemMediaPasteMode(false);
+            return;
+          }
+          
+          const uploaded = await uploadItemMedia(file);
+          if (uploaded) {
+            setNewItemMedia(uploaded);
+          }
+          setItemMediaPasteMode(false);
+          return;
+        }
+      }
+    }
+  }, [itemMediaPasteMode, uploadItemMedia]);
+
+  React.useEffect(() => {
+    if (itemMediaPasteMode) {
+      document.addEventListener("paste", handleItemMediaPaste);
+      return () => document.removeEventListener("paste", handleItemMediaPaste);
+    }
+  }, [handleItemMediaPaste, itemMediaPasteMode]);
+
+  // Clamp viewingItemIndex if the filtered items list shrinks/changes
+  React.useEffect(() => {
+    if (viewingItemIndex === null) return;
+    if (filteredItemRows.length === 0) {
+      setViewingItemIndex(null);
+      return;
+    }
+    if (viewingItemIndex >= filteredItemRows.length) {
+      setViewingItemIndex(filteredItemRows.length - 1);
+    }
+  }, [filteredItemRows.length, viewingItemIndex]);
+
+  // Reset to page 1 when the search changes
+  React.useEffect(() => {
+    setItemPage(1);
+  }, [itemSearch]);
+
+  const closeItemViewer = useCallback(() => setViewingItemIndex(null), []);
+  const showPrevItem = useCallback(() => {
+    setViewingItemIndex((idx) => {
+      if (idx === null || filteredItemRows.length === 0) return idx;
+      return idx === 0 ? filteredItemRows.length - 1 : idx - 1;
+    });
+  }, [filteredItemRows.length]);
+  const showNextItem = useCallback(() => {
+    setViewingItemIndex((idx) => {
+      if (idx === null || filteredItemRows.length === 0) return idx;
+      return idx === filteredItemRows.length - 1 ? 0 : idx + 1;
+    });
+  }, [itemRows.length]);
+
+  // Keyboard navigation while the viewer is open
+  React.useEffect(() => {
+    if (viewingItemIndex === null) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeItemViewer();
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        showPrevItem();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        showNextItem();
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [closeItemViewer, showNextItem, showPrevItem, viewingItemIndex]);
+
+  const goToItemPage = useCallback((page: number) => {
+    setItemPage(() => Math.min(Math.max(1, page), itemTotalPages));
+  }, [itemTotalPages]);
+
+  const addItemRow = useCallback(async () => {
     if (!permissions.canEditCard) return;
     if (!newItemNameTitle.trim()) return;
     setSavingTab("item");
@@ -422,12 +566,14 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
       await createItemMutation.mutateAsync({
         cardId: card.id,
         nameTitle: newItemNameTitle.trim(),
+        description: newItemDescription.trim() || undefined,
         linkUrl: newItemLinkUrl.trim() || undefined,
         value: newItemValue === "" ? 0 : Number(newItemValue),
         itemDate: newItemDate || undefined,
         media: newItemMedia,
       });
       setNewItemNameTitle("");
+      setNewItemDescription("");
       setNewItemLinkUrl("");
       setNewItemValue("");
       setNewItemDate("");
@@ -435,15 +581,87 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
     } finally {
       setSavingTab(null);
     }
-  };
+  }, [card.id, createItemMutation, newItemDate, newItemDescription, newItemLinkUrl, newItemMedia, newItemNameTitle, newItemValue, permissions.canEditCard]);
 
-  const deleteItemRow = async (itemId: number) => {
+  const deleteItemRow = useCallback(async (itemId: number) => {
     if (!permissions.canEditCard) return;
     if (!confirm("Delete this item row?")) return;
     await deleteItemMutation.mutateAsync({ id: itemId });
-  };
+  }, [deleteItemMutation, permissions.canEditCard]);
 
-  const updateNoteColumnWidth = (columnIndex: number, width: number) => {
+  const startEditItemRow = useCallback((item: CardItemRow) => {
+    setEditingItemId(item.id);
+    setEditingItemNameTitle(item.nameTitle);
+    setEditingItemDescription(item.description ?? "");
+    setEditingItemLinkUrl(item.linkUrl ?? "");
+    setEditingItemValue(item.value);
+    setEditingItemDate(item.itemDate ?? "");
+    setEditingItemMedia(item.media ?? null);
+    setEditingItemMediaDirty(false);
+  }, []);
+
+  const cancelEditItemRow = useCallback(() => {
+    setEditingItemId(null);
+    setEditingItemNameTitle("");
+    setEditingItemDescription("");
+    setEditingItemLinkUrl("");
+    setEditingItemValue("");
+    setEditingItemDate("");
+    setEditingItemMedia(null);
+    setEditingItemMediaDirty(false);
+  }, []);
+
+  const handleEditingItemMediaChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) {
+      alert("File size exceeds 10 MB limit");
+      e.target.value = "";
+      return;
+    }
+    const uploaded = await uploadItemMedia(file);
+    if (uploaded) {
+      setEditingItemMedia(uploaded);
+      setEditingItemMediaDirty(true);
+    }
+    e.target.value = "";
+  }, [uploadItemMedia]);
+
+  const removeEditingItemMedia = useCallback(() => {
+    setEditingItemMedia(null);
+    setEditingItemMediaDirty(true);
+  }, []);
+
+  const saveEditItemRow = useCallback(async () => {
+    if (!permissions.canEditCard || editingItemId === null) return;
+    if (!editingItemNameTitle.trim()) return;
+
+    await updateItemMutation.mutateAsync({
+      id: editingItemId,
+      nameTitle: editingItemNameTitle.trim(),
+      description: editingItemDescription.trim() || undefined,
+      linkUrl: editingItemLinkUrl.trim() || undefined,
+      value: editingItemValue === "" ? 0 : Number(editingItemValue),
+      itemDate: editingItemDate || undefined,
+      ...(editingItemMediaDirty ? { media: editingItemMedia } : {}),
+    });
+
+    cancelEditItemRow();
+  }, [
+    cancelEditItemRow,
+    editingItemDate,
+    editingItemDescription,
+    editingItemId,
+    editingItemLinkUrl,
+    editingItemMedia,
+    editingItemMediaDirty,
+    editingItemNameTitle,
+    editingItemValue,
+    permissions.canEditCard,
+    updateItemMutation,
+  ]);
+
+  const updateNoteColumnWidth = useCallback((columnIndex: number, width: number) => {
     if (!permissions.canEditCard) return;
     const nextNoteTable = {
       ...noteTable,
@@ -453,36 +671,40 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
     };
     setNoteTable(nextNoteTable);
     void saveNoteTable(nextNoteTable);
-  };
+  }, [noteTable, permissions.canEditCard, saveNoteTable]);
 
-  const updateNoteCell = (rowIndex: number, columnIndex: number, value: string) => {
-    const nextNoteTable = {
-      ...noteTable,
-      rows: noteTable.rows.map((row, currentRowIndex) =>
+  const updateNoteCell = useCallback((rowIndex: number, columnIndex: number, value: string) => {
+    setNoteTable(prev => ({
+      ...prev,
+      rows: prev.rows.map((row, currentRowIndex) =>
         currentRowIndex === rowIndex
           ? row.map((cell, currentColumnIndex) => (currentColumnIndex === columnIndex ? value : cell))
-          : row,
+          : row
       ),
-    };
-    setNoteTable(nextNoteTable);
-  };
+    }));
+  }, []);
 
-  const saveNoteCell = () => {
+  const saveNoteCell = useCallback(() => {
     if (!permissions.canEditCard) return;
     void saveNoteTable(noteTable);
-  };
+  }, [noteTable, permissions.canEditCard, saveNoteTable]);
 
-  const addNoteRow = () => {
+  const addNoteRow = useCallback(() => {
     if (!permissions.canEditCard) return;
+    setNoteTable(prev => ({
+      ...prev,
+      rows: [...prev.rows, Array.from({ length: prev.columnCount }, () => "")]
+    }));
+    // We need to save the table after state update, but setNoteTable is async.
+    // However, the current pattern calls saveNoteTable with the next state.
     const nextNoteTable = {
       ...noteTable,
-      rows: [...noteTable.rows, Array.from({ length: noteTable.columnCount }, () => "")],
+      rows: [...noteTable.rows, Array.from({ length: noteTable.columnCount }, () => "")]
     };
-    setNoteTable(nextNoteTable);
     void saveNoteTable(nextNoteTable);
-  };
+  }, [noteTable, permissions.canEditCard, saveNoteTable]);
 
-  const deleteNoteRow = (rowIndex: number) => {
+  const deleteNoteRow = useCallback((rowIndex: number) => {
     if (!permissions.canEditCard || noteTable.rows.length <= 1) return;
     const nextRows = noteTable.rows.filter((_row, currentRowIndex) => currentRowIndex !== rowIndex);
     const nextNoteTable = {
@@ -491,7 +713,7 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
     };
     setNoteTable(nextNoteTable);
     void saveNoteTable(nextNoteTable);
-  };
+  }, [noteTable, permissions.canEditCard, saveNoteTable]);
 
   return (
     <div key={containerKey} className="mt-5 w-full rounded-xl border-2 border-violet-100 bg-white p-3 sm:p-4 shadow-sm">
@@ -1007,12 +1229,42 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
               </div>
             )}
 
+            {/* Search + total count */}
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="relative w-full sm:max-w-xs">
+                <Search className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+                <input
+                  type="text"
+                  value={itemSearch}
+                  onChange={(e) => setItemSearch(e.currentTarget.value)}
+                  placeholder="Search items (name, description, link, date)..."
+                  className="w-full rounded-lg border border-gray-300 bg-white py-2 pl-8 pr-8 text-sm focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                />
+                {itemSearch && (
+                  <button
+                    type="button"
+                    onClick={() => setItemSearch("")}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                    aria-label="Clear search"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+              <p className="text-xs text-gray-500">
+                {itemSearch
+                  ? `${filteredItemRows.length} of ${itemRows.length} items`
+                  : `${itemRows.length} items`}
+              </p>
+            </div>
+
             <div className="-mx-3 overflow-x-auto sm:mx-0">
               <div className="inline-block min-w-full align-middle">
                 <table className="min-w-full divide-y divide-gray-200 text-sm">
                   <thead>
                     <tr className="bg-gray-50">
                       <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Name / Title</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Description</th>
                       <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Link</th>
                       <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Value</th>
                       <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Date</th>
@@ -1024,68 +1276,215 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
                   <tbody className="divide-y divide-gray-100 bg-white">
                     {itemRowsQuery.isLoading ? (
                       <tr>
-                        <td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-500">
+                        <td colSpan={8} className="px-3 py-6 text-center text-sm text-gray-500">
                           Loading item rows...
                         </td>
                       </tr>
-                    ) : itemRows.length === 0 ? (
+                    ) : filteredItemRows.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-500">
-                          No item rows for this card.
+                        <td colSpan={8} className="px-3 py-6 text-center text-sm text-gray-500">
+                          {itemSearch
+                            ? `No items match "${itemSearch}".`
+                            : "No item rows for this card."}
                         </td>
                       </tr>
                     ) : (
-                      itemRows.map((item) => {
-                        const isImage = item.media?.mimeType.startsWith("image/") ?? false;
+                      paginatedItemRows.map((item, pageIndex) => {
+                        const itemIndex = (effectiveItemPage - 1) * ITEM_PAGE_SIZE + pageIndex;
+                        const isEditingItem = editingItemId === item.id;
+                        const isImage = item.media
+                          ? (item.media.mimeType.startsWith("image/") ||
+                            /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(
+                              item.media.originalName || item.media.fileName,
+                            ))
+                          : false;
                         return (
-                          <tr key={item.id} className="hover:bg-gray-50">
-                            <td className="px-3 py-2 font-medium text-gray-900 break-words">{item.nameTitle}</td>
-                            <td className="px-3 py-2 text-gray-600">
-                              {item.linkUrl ? (
-                                <a
-                                  href={item.linkUrl}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-violet-700 underline-offset-2 hover:underline"
-                                >
-                                  Open link
-                                </a>
+                          <tr
+                            key={item.id}
+                            onClick={() => {
+                              if (isEditingItem) return;
+                              setViewingItemIndex(itemIndex);
+                            }}
+                            className={`hover:bg-violet-50 ${isEditingItem ? "" : "cursor-pointer"}`}
+                          >
+                            <td className="px-3 py-2 font-medium text-gray-900 break-words">
+                              {isEditingItem ? (
+                                <input
+                                  type="text"
+                                  value={editingItemNameTitle}
+                                  onChange={(e) => setEditingItemNameTitle(e.currentTarget.value)}
+                                  className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                                />
                               ) : (
-                                "—"
+                                item.nameTitle
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-gray-600 max-w-[200px]">
+                              {isEditingItem ? (
+                                <input
+                                  type="text"
+                                  value={editingItemDescription}
+                                  onChange={(e) => setEditingItemDescription(e.currentTarget.value)}
+                                  placeholder="Short details"
+                                  className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                                />
+                              ) : item.description?.trim() ? (
+                                <div>
+                                  <p className={expandedDescriptions.has(item.id) ? "whitespace-pre-wrap break-words text-xs" : "line-clamp-2 break-words text-xs"}>
+                                    {item.description.trim()}
+                                  </p>
+                                  {item.description.trim().length > 80 && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setExpandedDescriptions((prev) => {
+                                          const next = new Set(prev);
+                                          if (next.has(item.id)) next.delete(item.id);
+                                          else next.add(item.id);
+                                          return next;
+                                        });
+                                      }}
+                                      className="mt-0.5 text-[11px] font-medium text-violet-600 hover:underline"
+                                    >
+                                      {expandedDescriptions.has(item.id) ? "less" : "more"}
+                                    </button>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-gray-400">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-gray-600">
+                              {isEditingItem ? (
+                                <input
+                                  type="url"
+                                  value={editingItemLinkUrl}
+                                  onChange={(e) => setEditingItemLinkUrl(e.currentTarget.value)}
+                                  placeholder="https://example.com"
+                                  className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                                />
+                              ) : (
+                                item.linkUrl ? (
+                                  <a
+                                    href={item.linkUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="text-violet-700 underline-offset-2 hover:underline"
+                                  >
+                                    Open link
+                                  </a>
+                                ) : (
+                                  "—"
+                                )
                               )}
                             </td>
                             <td className="px-3 py-2 font-semibold text-green-700 whitespace-nowrap">
-                              {item.value.toLocaleString()}
+                              {isEditingItem ? (
+                                <input
+                                  type="number"
+                                  value={editingItemValue}
+                                  onChange={(e) =>
+                                    setEditingItemValue(e.currentTarget.value === "" ? "" : Number(e.currentTarget.value))
+                                  }
+                                  min="0"
+                                  className="w-24 rounded border border-gray-300 px-2 py-1 text-sm text-gray-700 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                                />
+                              ) : (
+                                item.value.toLocaleString()
+                              )}
                             </td>
                             <td className="px-3 py-2 text-gray-600 whitespace-nowrap">
-                              {item.itemDate ? format(new Date(item.itemDate), "MMM d, yyyy") : "—"}
+                              {isEditingItem ? (
+                                <input
+                                  type="date"
+                                  value={editingItemDate}
+                                  onChange={(e) => setEditingItemDate(e.currentTarget.value)}
+                                  className="rounded border border-gray-300 px-2 py-1 text-sm focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                                />
+                              ) : (
+                                item.itemDate ? format(new Date(item.itemDate), "MMM d, yyyy") : "—"
+                              )}
                             </td>
                             <td className="px-3 py-2">
-                              {item.media ? (
+                              {isEditingItem ? (
+                                <div className="flex flex-col gap-1">
+                                  {editingItemMedia ? (
+                                    <div className="flex items-center gap-2">
+                                      {editingItemMedia.mimeType.startsWith("image/") ? (
+                                        /* eslint-disable-next-line @next/next/no-img-element */
+                                        <img
+                                          src={editingItemMedia.url}
+                                          alt={editingItemMedia.originalName}
+                                          width={40}
+                                          height={40}
+                                          className="h-10 w-10 shrink-0 rounded border border-gray-200 object-cover"
+                                        />
+                                      ) : (
+                                        <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded border border-gray-200 bg-gray-50">
+                                          {editingItemMedia.mimeType === "application/pdf"
+                                            ? <FileText className="h-4 w-4 text-red-400" />
+                                            : <Archive className="h-4 w-4 text-amber-500" />}
+                                        </span>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          removeEditingItemMedia();
+                                        }}
+                                        className="rounded border border-gray-300 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-100"
+                                      >
+                                        Remove
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <span className="text-xs text-gray-400">No media</span>
+                                  )}
+                                  <div className="flex items-center gap-1">
+                                    <input
+                                      type="file"
+                                      accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt"
+                                      onChange={(e) => {
+                                        void handleEditingItemMediaChange(e);
+                                      }}
+                                      disabled={itemMediaUploading}
+                                      className="w-full text-xs text-gray-600"
+                                    />
+                                    {itemMediaUploading && <Loader2 className="h-4 w-4 animate-spin text-violet-600" />}
+                                  </div>
+                                </div>
+                              ) : item.media ? (
                                 <div className="flex items-center gap-2">
                                   {isImage ? (
                                     <a
                                       href={item.media.url}
                                       target="_blank"
                                       rel="noopener noreferrer"
-                                      className="relative block h-10 w-10 overflow-hidden rounded border border-gray-200"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="block h-10 w-10 shrink-0 overflow-hidden rounded border border-gray-200"
                                     >
-                                      <Image
+                                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                                      <img
                                         src={item.media.url}
                                         alt={item.media.originalName}
-                                        fill
-                                        className="object-cover"
-                                        unoptimized
+                                        width={40}
+                                        height={40}
+                                        className="h-full w-full object-cover"
                                       />
                                     </a>
                                   ) : (
                                     <a
-                                      href={item.media.url}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="rounded border border-gray-200 px-2 py-1 text-xs text-gray-700 hover:border-violet-200 hover:bg-violet-50"
+                                      href={`/api/download?url=${encodeURIComponent(item.media.url)}&filename=${encodeURIComponent(item.media.originalName)}`}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs text-gray-700 hover:border-violet-300 hover:bg-violet-50"
+                                      title={`Download ${item.media.originalName}`}
                                     >
-                                      View file
+                                      {item.media.mimeType === "application/pdf"
+                                        ? <FileText className="h-3.5 w-3.5 text-red-400 shrink-0" />
+                                        : <Archive className="h-3.5 w-3.5 text-amber-500 shrink-0" />}
+                                      <Download className="h-3 w-3 shrink-0" />
                                     </a>
                                   )}
                                   <span className="max-w-[140px] truncate text-xs text-gray-500" title={item.media.originalName}>
@@ -1099,16 +1498,49 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
                             <td className="px-3 py-2 text-gray-500 text-xs whitespace-nowrap hidden md:table-cell">
                               {format(toZonedTime(new Date(item.createdAt), "Asia/Bangkok"), "MMM d, yyyy HH:mm")}
                             </td>
-                            <td className="px-3 py-2 text-right">
+                            <td className="px-3 py-2 text-right" onClick={(e) => e.stopPropagation()}>
                               {permissions.canEditCard && (
-                                <button
-                                  type="button"
-                                  onClick={() => void deleteItemRow(item.id)}
-                                  disabled={deleteItemMutation.isPending}
-                                  className="rounded p-1 text-gray-400 hover:bg-red-100 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50"
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </button>
+                                <div className="flex items-center justify-end gap-1">
+                                  {isEditingItem ? (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          void saveEditItemRow();
+                                        }}
+                                        disabled={updateItemMutation.isPending || !editingItemNameTitle.trim()}
+                                        className="rounded border border-violet-300 bg-violet-50 px-2 py-1 text-xs font-medium text-violet-700 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                      >
+                                        {updateItemMutation.isPending ? "Saving..." : "Save"}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={cancelEditItemRow}
+                                        disabled={updateItemMutation.isPending}
+                                        className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                      >
+                                        Cancel
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => startEditItemRow(item)}
+                                      disabled={updateItemMutation.isPending || deleteItemMutation.isPending}
+                                      className="rounded p-1 text-gray-400 hover:bg-violet-100 hover:text-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      <Edit className="h-4 w-4" />
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => void deleteItemRow(item.id)}
+                                    disabled={deleteItemMutation.isPending || updateItemMutation.isPending}
+                                    className="rounded p-1 text-gray-400 hover:bg-red-100 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50"
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </button>
+                                </div>
                               )}
                             </td>
                           </tr>
@@ -1120,6 +1552,7 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
                     <tr className="border-t-2 border-gray-200 bg-gray-50 font-semibold">
                       <td className="px-3 py-2 text-gray-900 whitespace-nowrap">SUM</td>
                       <td className="px-3 py-2"></td>
+                      <td className="px-3 py-2"></td>
                       <td className="px-3 py-2 text-green-700 whitespace-nowrap">{itemTotalValue.toLocaleString()}</td>
                       <td colSpan={4}></td>
                     </tr>
@@ -1127,6 +1560,202 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
                 </table>
               </div>
             </div>
+
+            {/* Pagination */}
+            {filteredItemRows.length > ITEM_PAGE_SIZE && (
+              <div className="flex flex-col items-center justify-between gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 sm:flex-row">
+                <p className="text-xs text-gray-600">
+                  Showing {(effectiveItemPage - 1) * ITEM_PAGE_SIZE + 1}–{Math.min(effectiveItemPage * ITEM_PAGE_SIZE, filteredItemRows.length)} of {filteredItemRows.length}
+                </p>
+                <div className="flex flex-wrap items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => goToItemPage(effectiveItemPage - 1)}
+                    disabled={effectiveItemPage === 1}
+                    className="inline-flex items-center gap-1 rounded-md border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                    Prev
+                  </button>
+                  {(() => {
+                    const pages: (number | "...")[] = [];
+                    const maxButtons = 7;
+                    if (itemTotalPages <= maxButtons) {
+                      for (let i = 1; i <= itemTotalPages; i++) pages.push(i);
+                    } else {
+                      pages.push(1);
+                      const left = Math.max(2, effectiveItemPage - 1);
+                      const right = Math.min(itemTotalPages - 1, effectiveItemPage + 1);
+                      if (left > 2) pages.push("...");
+                      for (let i = left; i <= right; i++) pages.push(i);
+                      if (right < itemTotalPages - 1) pages.push("...");
+                      pages.push(itemTotalPages);
+                    }
+                    return pages.map((p, i) =>
+                      p === "..." ? (
+                        <span key={`ell-${i}`} className="px-1 text-xs text-gray-400">…</span>
+                      ) : (
+                        <button
+                          key={p}
+                          type="button"
+                          onClick={() => goToItemPage(p)}
+                          className={`min-w-[28px] rounded-md px-2 py-1 text-xs font-medium transition-colors ${
+                            p === effectiveItemPage
+                              ? "bg-violet-600 text-white"
+                              : "border border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
+                          }`}
+                        >
+                          {p}
+                        </button>
+                      ),
+                    );
+                  })()}
+                  <button
+                    type="button"
+                    onClick={() => goToItemPage(effectiveItemPage + 1)}
+                    disabled={effectiveItemPage >= itemTotalPages}
+                    className="inline-flex items-center gap-1 rounded-md border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Next
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {viewingItemIndex !== null && filteredItemRows[viewingItemIndex] && (() => {
+              const viewItem = filteredItemRows[viewingItemIndex];
+              const viewIsImage = viewItem.media
+                ? (viewItem.media.mimeType.startsWith("image/") ||
+                  /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(
+                    viewItem.media.originalName || viewItem.media.fileName,
+                  ))
+                : false;
+              return (
+                <div
+                  className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+                  onClick={closeItemViewer}
+                >
+                  <div
+                    className="relative max-h-[92vh] w-full max-w-2xl overflow-auto rounded-xl bg-white p-6 shadow-xl ring-2 ring-violet-500"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {/* Top nav: Previous / counter / Next / Close */}
+                    <div className="mb-4 flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={showPrevItem}
+                        disabled={filteredItemRows.length <= 1}
+                        className="inline-flex items-center gap-1 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <ChevronLeft className="h-4 w-4" />
+                        Previous
+                      </button>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-medium uppercase tracking-wide text-violet-600">
+                          Item {viewingItemIndex + 1} of {filteredItemRows.length}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={closeItemViewer}
+                          className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
+                          aria-label="Close"
+                        >
+                          <X className="h-5 w-5" />
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={showNextItem}
+                        disabled={filteredItemRows.length <= 1}
+                        className="inline-flex items-center gap-1 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Next
+                        <ChevronRight className="h-4 w-4" />
+                      </button>
+                    </div>
+
+                    <h3 className="text-lg font-semibold text-gray-900 break-words">
+                      {viewItem.nameTitle}
+                    </h3>
+
+                    <dl className="mt-4 space-y-3 text-sm">
+                      <div>
+                        <dt className="text-xs font-medium text-gray-500">Description</dt>
+                        <dd className="mt-1 whitespace-pre-wrap break-words text-gray-800">
+                          {viewItem.description?.trim() ? viewItem.description : <span className="text-gray-400">—</span>}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-xs font-medium text-gray-500">Media</dt>
+                        <dd className="mt-1">
+                          {viewItem.media ? (
+                            viewIsImage ? (
+                              <a
+                                href={viewItem.media.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="block overflow-hidden rounded-lg border border-gray-200 bg-gray-50"
+                              >
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                  src={viewItem.media.url}
+                                  alt={viewItem.media.originalName}
+                                  className="max-h-[50vh] w-full object-contain"
+                                />
+                              </a>
+                            ) : (
+                              <a
+                                href={`/api/download?url=${encodeURIComponent(viewItem.media.url)}&filename=${encodeURIComponent(viewItem.media.originalName)}`}
+                                className="inline-flex items-center gap-2 rounded border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:border-violet-300 hover:bg-violet-50"
+                              >
+                                {viewItem.media.mimeType === "application/pdf"
+                                  ? <FileText className="h-4 w-4 text-red-400" />
+                                  : <Archive className="h-4 w-4 text-amber-500" />}
+                                <span className="max-w-[260px] truncate">{viewItem.media.originalName}</span>
+                                <Download className="h-3.5 w-3.5" />
+                              </a>
+                            )
+                          ) : (
+                            <span className="text-gray-400">—</span>
+                          )}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-xs font-medium text-gray-500">DB Timestamp</dt>
+                        <dd className="mt-1 text-xs text-gray-500">
+                          {format(toZonedTime(new Date(viewItem.createdAt), "Asia/Bangkok"), "MMM d, yyyy HH:mm")}
+                        </dd>
+                      </div>
+                    </dl>
+
+                    {/* Bottom meta row: Value / Date / Link */}
+                    <div className="mt-6 flex flex-wrap items-center gap-2 border-t border-gray-100 pt-4 text-xs">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-3 py-1 font-semibold text-green-700">
+                        Value: {viewItem.value.toLocaleString()}
+                      </span>
+                      <span className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-3 py-1 font-medium text-blue-700">
+                        Date: {viewItem.itemDate ? format(new Date(viewItem.itemDate), "MMM d, yyyy") : "—"}
+                      </span>
+                      {viewItem.linkUrl ? (
+                        <a
+                          href={viewItem.linkUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex max-w-full items-center gap-1 rounded-full bg-violet-100 px-3 py-1 font-medium text-violet-700 hover:bg-violet-200"
+                        >
+                          <span className="truncate">Link: {viewItem.linkUrl}</span>
+                        </a>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-3 py-1 font-medium text-gray-500">
+                          Link: —
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
             {permissions.canEditCard && (
               <div className="rounded-lg border border-violet-200 bg-violet-50 p-3">
@@ -1143,7 +1772,17 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
                     />
                   </div>
                   <div>
-                    <label className="mb-1 block text-xs text-gray-600">2. Link (URL)</label>
+                    <label className="mb-1 block text-xs text-gray-600">2. Description</label>
+                    <input
+                      type="text"
+                      value={newItemDescription}
+                      onChange={(e) => setNewItemDescription(e.currentTarget.value)}
+                      placeholder="Short details"
+                      className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-gray-600">3. Link (URL)</label>
                     <input
                       type="url"
                       value={newItemLinkUrl}
@@ -1153,7 +1792,7 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
                     />
                   </div>
                   <div>
-                    <label className="mb-1 block text-xs text-gray-600">3. Value</label>
+                    <label className="mb-1 block text-xs text-gray-600">4. Value</label>
                     <input
                       type="number"
                       value={newItemValue}
@@ -1166,7 +1805,7 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
                     />
                   </div>
                   <div>
-                    <label className="mb-1 block text-xs text-gray-600">4. Date</label>
+                    <label className="mb-1 block text-xs text-gray-600">5. Date</label>
                     <input
                       type="date"
                       value={newItemDate}
@@ -1177,30 +1816,107 @@ export function CardTabsContainer({ card }: CardTabsContainerProps) {
                 </div>
 
                 <div className="mt-3">
-                  <label className="mb-1 block text-xs text-gray-600">5. Media</label>
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                    <input
-                      type="file"
-                      accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt"
-                      onChange={(e) => {
-                        void handleItemMediaChange(e);
-                      }}
-                      className="w-full text-sm text-gray-600"
-                    />
-                    {itemMediaUploading && <Loader2 className="h-4 w-4 animate-spin text-violet-600" />}
-                  </div>
-                  {newItemMedia && (
-                    <div className="mt-2 flex items-center gap-2 text-xs text-gray-600">
-                      <span className="max-w-[220px] truncate">{newItemMedia.originalName}</span>
+                  <label className="mb-1 block text-xs text-gray-600">6. Media</label>
+
+                  {/* Preview if media is selected */}
+                  {newItemMedia ? (
+                    <div className="mb-2 flex items-center gap-3 rounded-lg border border-violet-200 bg-white p-2">
+                      {newItemMedia.mimeType.startsWith("image/") ? (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={newItemMedia.url}
+                          alt={newItemMedia.originalName}
+                          className="h-16 w-16 shrink-0 rounded border border-gray-200 object-cover"
+                        />
+                      ) : (
+                        <span className="inline-flex h-16 w-16 shrink-0 items-center justify-center rounded border border-gray-200 bg-gray-50">
+                          {newItemMedia.mimeType === "application/pdf"
+                            ? <FileText className="h-6 w-6 text-red-400" />
+                            : <Archive className="h-6 w-6 text-amber-500" />}
+                        </span>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-gray-900">
+                          {newItemMedia.originalName}
+                        </p>
+                        <p className="text-xs text-gray-500">Ready to upload</p>
+                      </div>
                       <button
                         type="button"
                         onClick={() => setNewItemMedia(null)}
-                        className="rounded border border-gray-300 px-2 py-0.5 text-gray-600 hover:bg-gray-100"
+                        className="shrink-0 rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
                       >
                         Remove
                       </button>
                     </div>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {/* Camera (mobile-first) */}
+                      <label
+                        className={`flex cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-violet-300 bg-white px-4 py-4 text-center text-sm font-medium text-violet-700 transition-colors hover:border-violet-500 hover:bg-violet-50 ${
+                          itemMediaUploading ? "cursor-not-allowed opacity-50" : ""
+                        }`}
+                      >
+                        <input
+                          type="file"
+                          accept="image/*"
+                          capture="environment"
+                          onChange={(e) => {
+                            void handleItemMediaChange(e);
+                          }}
+                          disabled={itemMediaUploading}
+                          className="sr-only"
+                        />
+                        <span className="text-2xl leading-none">📷</span>
+                        <span>Take Photo</span>
+                      </label>
+
+                      {/* Choose from device */}
+                      <label
+                        className={`flex cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed border-gray-300 bg-white px-4 py-4 text-center text-sm font-medium text-gray-700 transition-colors hover:border-violet-400 hover:bg-violet-50 ${
+                          itemMediaUploading ? "cursor-not-allowed opacity-50" : ""
+                        }`}
+                      >
+                        <input
+                          type="file"
+                          accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt"
+                          onChange={(e) => {
+                            void handleItemMediaChange(e);
+                          }}
+                          disabled={itemMediaUploading}
+                          className="sr-only"
+                        />
+                        <span className="text-2xl leading-none">📁</span>
+                        <span>Choose File</span>
+                      </label>
+                    </div>
                   )}
+
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    {itemMediaUploading && (
+                      <span className="inline-flex items-center gap-1 text-xs text-violet-600">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Uploading...
+                      </span>
+                    )}
+                    {/* Desktop-only paste helper */}
+                    <button
+                      type="button"
+                      onClick={() => setItemMediaPasteMode(true)}
+                      disabled={itemMediaUploading || itemMediaPasteMode}
+                      className={`hidden sm:inline-flex items-center gap-1 rounded border px-2 py-1 text-xs font-medium transition-colors ${
+                        itemMediaPasteMode
+                          ? "border-violet-500 bg-violet-50 text-violet-700"
+                          : "border-gray-300 bg-white text-gray-600 hover:bg-gray-50"
+                      } disabled:cursor-not-allowed disabled:opacity-50`}
+                    >
+                      {itemMediaPasteMode ? "Ready to paste (Ctrl+V)..." : "📋 Paste from clipboard"}
+                    </button>
+                  </div>
+
+                  <p className="mt-1 text-xs text-gray-500">
+                    Max 10 MB. Images &gt;100 KB auto-compress to WebP.
+                  </p>
                 </div>
 
                 <div className="mt-3 flex justify-end">

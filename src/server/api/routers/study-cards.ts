@@ -1,10 +1,10 @@
-import { eq, desc, and, like, sql } from "drizzle-orm";
+import { eq, desc, and, sql } from "drizzle-orm";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { getCardPermissions } from "~/config/card-settings";
 import { createTRPCRouter, publicProcedure } from "~/server/api/trpc";
 import { studyCards } from "~/server/db/schema";
-import { generateUploadUrl, getS3Key, getPublicUrl, deleteS3Object } from "~/server/s3";
+import { deleteS3Object } from "~/server/s3";
 
 export const studyCardsRouter = createTRPCRouter({
   getAll: publicProcedure
@@ -35,7 +35,7 @@ export const studyCardsRouter = createTRPCRouter({
 
       if (input.search) {
         conditions.push(
-          sql`(${studyCards.title} ILIKE ${`%${input.search}%`} OR ${studyCards.description} ILIKE ${`%${input.search}%`})`
+          sql`(${studyCards.title} ILIKE ${`%${input.search}%`} OR ${studyCards.description} ILIKE ${`%${input.search}%` })`
         );
       }
 
@@ -44,7 +44,18 @@ export const studyCardsRouter = createTRPCRouter({
       }
 
       const cards = await ctx.db
-        .select()
+        .select({
+          id: studyCards.id,
+          title: studyCards.title,
+          category: studyCards.category,
+          difficulty: studyCards.difficulty,
+          isCompleted: studyCards.isCompleted,
+          rating: studyCards.rating,
+          imageUrl: studyCards.imageUrl,
+          createdAt: studyCards.createdAt,
+          investDate: studyCards.investDate,
+          estimatedCost: studyCards.estimatedCost,
+        })
         .from(studyCards)
         .where(conditions.length > 0 ? and(...conditions) : undefined)
         .orderBy(desc(studyCards.createdAt))
@@ -74,7 +85,7 @@ export const studyCardsRouter = createTRPCRouter({
     .input(
       z.object({
         title: z.string().min(1).max(255),
-        description: z.string().min(1),
+        description: z.string().optional(),
         referenceUrl: z.string().url().optional(),
         youtubeUrl: z.string().url().optional(),
         imageUrl: z.string().optional(),
@@ -95,7 +106,7 @@ export const studyCardsRouter = createTRPCRouter({
         .insert(studyCards)
         .values({
           title: input.title,
-          description: input.description,
+          description: input.description ?? "",
           referenceUrl: input.referenceUrl ?? null,
           youtubeUrl: input.youtubeUrl ?? null,
           imageUrl: input.imageUrl ?? null,
@@ -189,7 +200,7 @@ export const studyCardsRouter = createTRPCRouter({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const card = await ctx.db
-        .select()
+        .select({ id: studyCards.id, title: studyCards.title, imageS3Key: studyCards.imageS3Key })
         .from(studyCards)
         .where(eq(studyCards.id, input.id))
         .limit(1);
@@ -218,44 +229,6 @@ export const studyCardsRouter = createTRPCRouter({
       return { success: true };
     }),
 
-  uploadImage: publicProcedure
-    .input(
-      z.object({
-        fileName: z.string(),
-        contentType: z.string(),
-      })
-    )
-    .mutation(async ({ input }) => {
-      const timestamp = Date.now();
-      const safeName = input.fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const uniqueName = `${timestamp}_${safeName}`;
-      const s3Key = getS3Key("study-cards", uniqueName);
-      const uploadUrl = await generateUploadUrl(s3Key, input.contentType);
-      const publicUrl = getPublicUrl(s3Key);
-
-      return { uploadUrl, s3Key, publicUrl, fileName: uniqueName };
-    }),
-
-  setImage: publicProcedure
-    .input(
-      z.object({
-        id: z.number(),
-        s3Key: z.string(),
-        imageUrl: z.string(),
-      })
-    )
-    .mutation(async ({ ctx, input }) => {
-      const result = await ctx.db
-        .update(studyCards)
-        .set({
-          imageUrl: input.imageUrl,
-          imageS3Key: input.s3Key,
-        })
-        .where(eq(studyCards.id, input.id))
-        .returning();
-      return result[0];
-    }),
-
   getCategories: publicProcedure.query(async ({ ctx }) => {
     const result = await ctx.db
       .select({ category: studyCards.category })
@@ -274,22 +247,18 @@ export const studyCardsRouter = createTRPCRouter({
     }),
 
   getStats: publicProcedure.query(async ({ ctx }) => {
-    const totalResult = await ctx.db
-      .select({ count: sql<number>`count(*)` })
+    const [stats] = await ctx.db
+      .select({
+        total: sql<number>`count(*)`,
+        completed: sql<number>`count(*) filter (where ${studyCards.isCompleted} = true)`,
+        avgRating: sql<number>`coalesce(avg(${studyCards.rating}) filter (where ${studyCards.rating} > 0), 0)`,
+      })
       .from(studyCards);
-    const completedResult = await ctx.db
-      .select({ count: sql<number>`count(*)` })
-      .from(studyCards)
-      .where(eq(studyCards.isCompleted, true));
-    const avgRatingResult = await ctx.db
-      .select({ avg: sql<number>`avg(${studyCards.rating})` })
-      .from(studyCards)
-      .where(sql`${studyCards.rating} > 0`);
 
     return {
-      total: Number(totalResult[0]?.count ?? 0),
-      completed: Number(completedResult[0]?.count ?? 0),
-      avgRating: Number(avgRatingResult[0]?.avg ?? 0).toFixed(1),
+      total: Number(stats?.total ?? 0),
+      completed: Number(stats?.completed ?? 0),
+      avgRating: Number(stats?.avgRating ?? 0).toFixed(1),
     };
   }),
 });

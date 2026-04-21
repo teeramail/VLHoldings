@@ -5,7 +5,7 @@ import { z } from "zod";
 import { getCardPermissions } from "~/config/card-settings";
 import { createTRPCRouter, publicProcedure } from "~/server/api/trpc";
 import { studyCardItems, studyCards } from "~/server/db/schema";
-import { generateDownloadUrl } from "~/server/s3";
+import { deleteS3Object, getPublicUrl } from "~/server/s3";
 
 const mediaSchema = z
   .object({
@@ -30,10 +30,11 @@ function parseMedia(rawMedia: string | null) {
   }
 }
 
-async function mapItemForResponse(item: {
+function mapItemForResponse(item: {
   id: number;
   cardId: number;
   nameTitle: string;
+  description: string | null;
   linkUrl: string | null;
   value: number;
   itemDate: string | null;
@@ -49,12 +50,11 @@ async function mapItemForResponse(item: {
     };
   }
 
-  const signedUrl = await generateDownloadUrl(parsedMedia.s3Key);
   return {
     ...item,
     media: {
       ...parsedMedia,
-      url: signedUrl,
+      url: getPublicUrl(parsedMedia.s3Key),
     },
   };
 }
@@ -69,7 +69,7 @@ export const studyCardItemsRouter = createTRPCRouter({
         .where(eq(studyCardItems.cardId, input.cardId))
         .orderBy(desc(studyCardItems.createdAt), desc(studyCardItems.id));
 
-      return Promise.all(items.map(mapItemForResponse));
+      return items.map(mapItemForResponse);
     }),
 
   create: publicProcedure
@@ -77,6 +77,7 @@ export const studyCardItemsRouter = createTRPCRouter({
       z.object({
         cardId: z.number().int().positive(),
         nameTitle: z.string().trim().min(1),
+        description: z.string().trim().optional(),
         linkUrl: z.string().url().optional(),
         value: z.number().int().optional(),
         itemDate: z.string().optional(),
@@ -84,8 +85,9 @@ export const studyCardItemsRouter = createTRPCRouter({
       }),
     )
     .mutation(async ({ ctx, input }) => {
+      // Use a single query to check card existence and permissions
       const card = await ctx.db
-        .select({ id: studyCards.id, title: studyCards.title })
+        .select({ title: studyCards.title })
         .from(studyCards)
         .where(eq(studyCards.id, input.cardId))
         .limit(1);
@@ -110,12 +112,14 @@ export const studyCardItemsRouter = createTRPCRouter({
         .values({
           cardId: input.cardId,
           nameTitle: input.nameTitle,
+          description: input.description?.trim() || null,
           linkUrl: input.linkUrl ?? null,
           value: input.value ?? 0,
           itemDate: input.itemDate ?? null,
           media: input.media ? JSON.stringify(input.media) : null,
         })
         .returning();
+      
       const created = result[0];
       if (!created) {
         throw new TRPCError({
@@ -124,7 +128,7 @@ export const studyCardItemsRouter = createTRPCRouter({
         });
       }
 
-      return await mapItemForResponse(created);
+      return mapItemForResponse(created);
     }),
 
   update: publicProcedure
@@ -132,6 +136,7 @@ export const studyCardItemsRouter = createTRPCRouter({
       z.object({
         id: z.number().int().positive(),
         nameTitle: z.string().trim().min(1).optional(),
+        description: z.string().trim().optional(),
         linkUrl: z.string().url().optional(),
         value: z.number().int().optional(),
         itemDate: z.string().optional(),
@@ -141,9 +146,16 @@ export const studyCardItemsRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const { id, ...updates } = input;
 
+      // Join with studyCards to check permissions in a single query
       const existing = await ctx.db
-        .select({ id: studyCardItems.id, cardId: studyCardItems.cardId })
+        .select({
+          id: studyCardItems.id,
+          cardId: studyCardItems.cardId,
+          cardTitle: studyCards.title,
+          media: studyCardItems.media,
+        })
         .from(studyCardItems)
+        .innerJoin(studyCards, eq(studyCardItems.cardId, studyCards.id))
         .where(eq(studyCardItems.id, id))
         .limit(1);
 
@@ -155,46 +167,36 @@ export const studyCardItemsRouter = createTRPCRouter({
         });
       }
 
-      const card = await ctx.db
-        .select({ title: studyCards.title })
-        .from(studyCards)
-        .where(eq(studyCards.id, existingItem.cardId))
-        .limit(1);
-      const cardRow = card[0];
-
-      if (!cardRow) {
-        throw new TRPCError({
-          code: "NOT_FOUND",
-          message: "Card not found",
-        });
-      }
-
-      if (!getCardPermissions(cardRow.title).canEditCard) {
+      if (!getCardPermissions(existingItem.cardTitle).canEditCard) {
         throw new TRPCError({
           code: "FORBIDDEN",
           message: "This card is locked and cannot be edited",
         });
       }
 
-      const payload: {
-        nameTitle?: string;
-        linkUrl?: string | null;
-        value?: number;
-        itemDate?: string | null;
-        media?: string | null;
-      } = {};
-
+      const payload: Partial<typeof studyCardItems.$inferInsert> = {};
       if (updates.nameTitle !== undefined) payload.nameTitle = updates.nameTitle;
+      if (updates.description !== undefined) payload.description = updates.description || null;
       if (updates.linkUrl !== undefined) payload.linkUrl = updates.linkUrl || null;
       if (updates.value !== undefined) payload.value = updates.value;
       if (updates.itemDate !== undefined) payload.itemDate = updates.itemDate || null;
-      if (updates.media !== undefined) payload.media = updates.media ? JSON.stringify(updates.media) : null;
+
+      let previousMediaKeyToDelete: string | null = null;
+      if (updates.media !== undefined) {
+        payload.media = updates.media ? JSON.stringify(updates.media) : null;
+        const previousMedia = parseMedia(existingItem.media);
+        const nextKey = updates.media?.s3Key ?? null;
+        if (previousMedia?.s3Key && previousMedia.s3Key !== nextKey) {
+          previousMediaKeyToDelete = previousMedia.s3Key;
+        }
+      }
 
       const result = await ctx.db
         .update(studyCardItems)
         .set(payload)
         .where(eq(studyCardItems.id, id))
         .returning();
+
       const updated = result[0];
       if (!updated) {
         throw new TRPCError({
@@ -203,15 +205,29 @@ export const studyCardItemsRouter = createTRPCRouter({
         });
       }
 
-      return await mapItemForResponse(updated);
+      if (previousMediaKeyToDelete) {
+        try {
+          await deleteS3Object(previousMediaKeyToDelete);
+        } catch (error) {
+          console.error("Failed to delete previous item media from S3:", error);
+        }
+      }
+
+      return mapItemForResponse(updated);
     }),
 
   delete: publicProcedure
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
+      // Join with studyCards to check permissions in a single query
       const existing = await ctx.db
-        .select({ id: studyCardItems.id, cardId: studyCardItems.cardId })
+        .select({ 
+          id: studyCardItems.id, 
+          cardId: studyCardItems.cardId,
+          cardTitle: studyCards.title 
+        })
         .from(studyCardItems)
+        .innerJoin(studyCards, eq(studyCardItems.cardId, studyCards.id))
         .where(eq(studyCardItems.id, input.id))
         .limit(1);
 
@@ -223,21 +239,7 @@ export const studyCardItemsRouter = createTRPCRouter({
         });
       }
 
-      const card = await ctx.db
-        .select({ title: studyCards.title })
-        .from(studyCards)
-        .where(eq(studyCards.id, existingItem.cardId))
-        .limit(1);
-      const cardRow = card[0];
-
-      if (!cardRow) {
-        throw new TRPCError({
-          code: "NOT_FOUND",
-          message: "Card not found",
-        });
-      }
-
-      if (!getCardPermissions(cardRow.title).canEditCard) {
+      if (!getCardPermissions(existingItem.cardTitle).canEditCard) {
         throw new TRPCError({
           code: "FORBIDDEN",
           message: "This card is locked and cannot be edited",

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "~/server/db";
 import { studyCards } from "~/server/db/schema";
-import { sql, and, gte, lte, eq } from "drizzle-orm";
+import { sql, and, gte, lte } from "drizzle-orm";
 import { env } from "~/env";
 
 /**
@@ -14,7 +14,6 @@ import { env } from "~/env";
  *   - months: number of months to return (default: 12, max: 24)
  */
 export async function GET(request: Request) {
-  // --- API Key Authentication ---
   const apiKey = env.PRESIDENT_API_KEY;
   if (apiKey) {
     const authHeader = request.headers.get("authorization");
@@ -37,61 +36,75 @@ export async function GET(request: Request) {
 
   try {
     const now = new Date();
-    const summaries = [];
+    const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    const periodStart = new Date(now.getFullYear(), now.getMonth() - monthsCount + 1, 1);
 
+    const [monthlyStats, categoryStats] = await Promise.all([
+      db
+        .select({
+          month: sql<string>`to_char(date_trunc('month', ${studyCards.createdAt}), 'YYYY-MM')`,
+          itemCount: sql<number>`count(*)`,
+          completedCount: sql<number>`count(*) filter (where ${studyCards.isCompleted} = true)`,
+          totalExpenses: sql<number>`coalesce(sum(${studyCards.estimatedCost}), 0)`,
+          completedValue: sql<number>`coalesce(sum(${studyCards.estimatedCost}) filter (where ${studyCards.isCompleted} = true), 0)`,
+        })
+        .from(studyCards)
+        .where(and(gte(studyCards.createdAt, periodStart), lte(studyCards.createdAt, periodEnd)))
+        .groupBy(sql`date_trunc('month', ${studyCards.createdAt})`)
+        .orderBy(sql`date_trunc('month', ${studyCards.createdAt}) desc`),
+
+      db
+        .select({
+          month: sql<string>`to_char(date_trunc('month', ${studyCards.createdAt}), 'YYYY-MM')`,
+          category: sql<string>`coalesce(${studyCards.category}, 'Uncategorized')`,
+          amount: sql<number>`coalesce(sum(${studyCards.estimatedCost}), 0)`,
+          count: sql<number>`count(*)`,
+        })
+        .from(studyCards)
+        .where(and(gte(studyCards.createdAt, periodStart), lte(studyCards.createdAt, periodEnd)))
+        .groupBy(sql`date_trunc('month', ${studyCards.createdAt})`, sql`coalesce(${studyCards.category}, 'Uncategorized')`)
+        .orderBy(sql`date_trunc('month', ${studyCards.createdAt}) desc`),
+    ]);
+
+    const categoryByMonth = new Map<string, { name: string; amount: number; count: number }[]>();
+    for (const row of categoryStats) {
+      const key = row.month;
+      const list = categoryByMonth.get(key) ?? [];
+      list.push({ name: row.category, amount: Number(row.amount), count: Number(row.count) });
+      categoryByMonth.set(key, list);
+    }
+
+    const statsMap = new Map<string, typeof monthlyStats[number]>();
+    for (const row of monthlyStats) {
+      statsMap.set(row.month, row);
+    }
+
+    const summaries = [];
     for (let i = 0; i < monthsCount; i++) {
       const targetDate = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const periodStart = new Date(targetDate.getFullYear(), targetDate.getMonth(), 1);
-      const periodEnd = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 0, 23, 59, 59);
+      const monthStart = new Date(targetDate.getFullYear(), targetDate.getMonth(), 1);
+      const monthEnd = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 0, 23, 59, 59);
+      const monthKey = `${targetDate.getFullYear()}-${String(targetDate.getMonth() + 1).padStart(2, "0")}`;
 
-      const periodCards = await db
-        .select()
-        .from(studyCards)
-        .where(
-          and(
-            gte(studyCards.createdAt, periodStart),
-            lte(studyCards.createdAt, periodEnd)
-          )
-        );
-
-      const totalExpenses = periodCards.reduce(
-        (sum: number, card) => sum + (card.estimatedCost ?? 0),
-        0
-      );
-
-      const completedCards = periodCards.filter((c) => c.isCompleted);
-      const completedValue = completedCards.reduce(
-        (sum: number, card) => sum + (card.estimatedCost ?? 0),
-        0
-      );
-
-      const totalRevenue = completedValue;
-
-      // Category breakdown
-      const categoryMap = new Map<string, { amount: number; count: number }>();
-      for (const card of periodCards) {
-        const cat = card.category ?? "Uncategorized";
-        const existing = categoryMap.get(cat) ?? { amount: 0, count: 0 };
-        existing.amount += card.estimatedCost ?? 0;
-        existing.count += 1;
-        categoryMap.set(cat, existing);
-      }
+      const stats = statsMap.get(monthKey);
+      const totalExpenses = Number(stats?.totalExpenses ?? 0);
+      const completedValue = Number(stats?.completedValue ?? 0);
+      const itemCount = Number(stats?.itemCount ?? 0);
+      const completedCount = Number(stats?.completedCount ?? 0);
 
       summaries.push({
         periodType: "monthly" as const,
-        periodStart: periodStart.toISOString().split("T")[0],
-        periodEnd: periodEnd.toISOString().split("T")[0],
-        totalRevenue,
+        periodStart: monthStart.toISOString().split("T")[0],
+        periodEnd: monthEnd.toISOString().split("T")[0],
+        totalRevenue: completedValue,
         totalExpenses,
-        netProfit: totalRevenue - totalExpenses,
+        netProfit: completedValue - totalExpenses,
         cashInflow: completedValue,
         cashOutflow: totalExpenses,
         netCashFlow: completedValue - totalExpenses,
-        itemCount: periodCards.length,
-        completedCount: completedCards.length,
-        expenseCategories: Array.from(categoryMap.entries()).map(
-          ([name, data]) => ({ name, amount: data.amount, count: data.count })
-        ),
+        itemCount,
+        completedCount,
+        expenseCategories: categoryByMonth.get(monthKey) ?? [],
       });
     }
 

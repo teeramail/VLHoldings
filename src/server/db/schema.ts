@@ -38,6 +38,7 @@ export const studyCards = createTable(
     index("study_card_completed_idx").on(t.isCompleted),
     index("study_card_created_idx").on(t.createdAt),
     index("study_card_rating_idx").on(t.rating),
+    index("study_card_cursor_idx").on(t.createdAt, t.id),
   ]
 );
 
@@ -71,6 +72,7 @@ export const studyCardItems = createTable(
       .notNull()
       .references(() => studyCards.id, { onDelete: "cascade" }),
     nameTitle: d.text().notNull(),
+    description: d.text(),
     linkUrl: d.varchar({ length: 2048 }),
     value: d.integer().default(0).notNull(),
     itemDate: d.date(),
@@ -79,6 +81,7 @@ export const studyCardItems = createTable(
   }),
   (t) => [
     index("study_card_item_card_idx").on(t.cardId),
+    index("study_card_item_date_idx").on(t.itemDate),
     index("study_card_item_created_idx").on(t.createdAt),
   ]
 );

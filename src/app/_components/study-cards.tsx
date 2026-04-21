@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback, memo } from "react";
 import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
@@ -39,7 +39,178 @@ import { CardTabsContainer } from "./card-tabs-container";
 import { format } from "date-fns";
 import { CardDiscussion } from "./card-discussion";
 
-function getYoutubeEmbedUrl(url: string) {
+interface Attachment {
+  fileName: string;
+  originalName: string;
+  mimeType: string;
+  fileSize: number;
+  s3Key: string;
+  url: string;
+  subfolder?: string;
+  kind?: "card-image" | "attachment";
+}
+
+interface CardImageMeta {
+  s3Key: string;
+  imageUrl: string;
+  subfolder?: string;
+  originalName: string;
+  fileSize: number;
+}
+
+interface StudyCardData {
+  title?: string;
+  description?: string;
+  referenceUrl?: string;
+  youtubeUrl?: string;
+  imageUrl?: string;
+  imageS3Key?: string;
+  attachments?: string;
+  groupCalendar?: string;
+  expenses?: string;
+  category?: string;
+  difficulty?: string;
+  tags?: string;
+  isCompleted?: boolean;
+  rating?: number;
+  notes?: string;
+  estimatedCost?: number;
+  investDate?: string;
+}
+
+const TITLE_PLACEHOLDER_COLORS = [
+  "text-rose-500",
+  "text-amber-500",
+  "text-emerald-500",
+  "text-sky-500",
+  "text-violet-500",
+  "text-fuchsia-500",
+  "text-teal-500",
+  "text-orange-500",
+  "text-indigo-500",
+  "text-lime-600",
+];
+
+function ColorfulTitlePlaceholder({ title }: { title: string }) {
+  const words = (title || "Untitled").trim().split(/\s+/).filter(Boolean);
+  const totalChars = words.join("").length || 1;
+  const fontSize =
+    totalChars <= 6
+      ? "clamp(3rem, 10vw, 5.5rem)"
+      : totalChars <= 14
+      ? "clamp(2.2rem, 7vw, 4rem)"
+      : totalChars <= 24
+      ? "clamp(1.8rem, 5.5vw, 3.2rem)"
+      : "clamp(1.4rem, 4vw, 2.4rem)";
+
+  return (
+    <div
+      className="flex h-full w-full items-center justify-center p-6"
+      style={{ background: "linear-gradient(135deg, #ede9fe 0%, #fce7f3 50%, #fef9c3 100%)" }}
+    >
+      <div
+        className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-center font-extrabold leading-tight"
+        style={{ fontSize }}
+      >
+        {words.map((word, idx) => (
+          <span key={`${word}-${idx}`} className={TITLE_PLACEHOLDER_COLORS[idx % TITLE_PLACEHOLDER_COLORS.length]}>
+            {word}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const MAX_CARD_IMAGES = 10;
+const MAX_CARD_IMAGE_INPUT_BYTES = 25 * 1024 * 1024;
+const MAX_CARD_IMAGE_INPUT_LABEL = "25 MB";
+const MAX_ATTACHMENT_SIZE_BYTES = 12 * 1024 * 1024;
+const MAX_ATTACHMENT_SIZE_LABEL = "12 MB";
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function getAttachmentIcon(mimeType: string) {
+  if (!mimeType) return FileText;
+  
+  const type = mimeType.toLowerCase();
+  if (type === "text/x-url") return ExternalLink;
+  if (type.startsWith("image/")) return ImageIcon;
+  if (type.startsWith("video/")) return FileVideo;
+  if (type.startsWith("audio/")) return FileAudio;
+  if (
+    type.includes("zip") || 
+    type.includes("tar") || 
+    type.includes("rar") ||
+    type.includes("7z") ||
+    type.includes("compressed")
+  ) {
+    return FileArchive;
+  }
+  
+  return FileText;
+}
+
+export async function compressCardImage(file: File): Promise<File> {
+  if (!file.type.startsWith("image/")) {
+    throw new Error("Only image files are allowed.");
+  }
+
+  if (file.size > MAX_CARD_IMAGE_INPUT_BYTES) {
+    throw new Error(`Each image must be ${MAX_CARD_IMAGE_INPUT_LABEL} or smaller before upload.`);
+  }
+
+  if (typeof window === "undefined") {
+    return file;
+  }
+
+  const bitmap = await createImageBitmap(file);
+  const maxDimension = 1600;
+  const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const context = canvas.getContext("2d");
+  if (!context) {
+    bitmap.close();
+    throw new Error("Image compression is not supported in this browser.");
+  }
+
+  context.drawImage(bitmap, 0, 0, width, height);
+  bitmap.close();
+
+  let quality = 0.82;
+  let blob = await new Promise<Blob | null>((resolve) => {
+    canvas.toBlob((result) => resolve(result), "image/webp", quality);
+  });
+
+  while (blob && blob.size > 350 * 1024 && quality > 0.4) {
+    quality -= 0.08;
+    blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob((result) => resolve(result), "image/webp", quality);
+    });
+  }
+
+  if (!blob) {
+    throw new Error("Image compression failed.");
+  }
+
+  const compressedName = file.name.replace(/\.[^.]+$/, "") || `image-${Date.now()}`;
+  return new File([blob], `${compressedName}.webp`, {
+    type: "image/webp",
+    lastModified: Date.now(),
+  });
+}
+
+function getYoutubeEmbedUrl(url: string): string | null {
   try {
     const parsed = new URL(url);
     const host = parsed.hostname.replace(/^www\./, "");
@@ -66,7 +237,7 @@ function getYoutubeEmbedUrl(url: string) {
   }
 }
 
-function escapeHtml(value: string) {
+function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -157,6 +328,84 @@ function getDescriptionPlainText(description: string) {
   return (doc.body.textContent ?? "").replace(/\s+/g, " ").trim();
 }
 
+type NoteTableData = {
+  columnCount: number;
+  columnWidths: number[];
+  rows: string[][];
+};
+
+type CardNotesPayload = {
+  version: 1;
+  text: string;
+  noteTable: NoteTableData | null;
+};
+
+function normalizeNoteTable(noteTable: NoteTableData | null | undefined): NoteTableData | null {
+  if (!noteTable) return null;
+  const safeColumnCount = Math.min(8, Math.max(1, noteTable.columnCount || 3));
+  const safeColumnWidths = Array.from(
+    { length: safeColumnCount },
+    (_value, index) => Math.min(480, Math.max(100, noteTable.columnWidths?.[index] ?? 180)),
+  );
+  const safeRows = noteTable.rows.map((row) =>
+    Array.from({ length: safeColumnCount }, (_value, index) => row[index] ?? ""),
+  );
+
+  return {
+    columnCount: safeColumnCount,
+    columnWidths: safeColumnWidths,
+    rows: safeRows,
+  };
+}
+
+function parseCardNotes(rawNotes: string | null | undefined) {
+  if (!rawNotes) {
+    return {
+      text: "",
+      noteTable: null,
+      hasStructuredData: false,
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(rawNotes) as Partial<CardNotesPayload>;
+    if (parsed?.version === 1) {
+      return {
+        text: parsed.text ?? "",
+        noteTable: normalizeNoteTable(parsed.noteTable),
+        hasStructuredData: true,
+      };
+    }
+  } catch {
+  }
+
+  return {
+    text: rawNotes,
+    noteTable: null,
+    hasStructuredData: false,
+  };
+}
+
+function serializeCardNotes(text: string, noteTable: NoteTableData | null) {
+  const trimmedText = text.trim();
+  const normalizedTable = normalizeNoteTable(noteTable);
+  const hasNoteTableContent = normalizedTable?.rows.some((row) => row.some((cell) => cell.trim().length > 0)) ?? false;
+
+  if (!trimmedText && !hasNoteTableContent) {
+    return undefined;
+  }
+
+  if (!hasNoteTableContent) {
+    return trimmedText || undefined;
+  }
+
+  return JSON.stringify({
+    version: 1,
+    text: trimmedText,
+    noteTable: normalizedTable,
+  } satisfies CardNotesPayload);
+}
+
 export function StudyCards() {
   const router = useRouter();
   const pathname = usePathname();
@@ -214,32 +463,32 @@ export function StudyCards() {
     router.replace(pathname, { scroll: false });
   }, [pathname, router, searchParams]);
 
-  const uploadImage = api.studyCards.uploadImage.useMutation();
-
-  const setImage = api.studyCards.setImage.useMutation();
-
   const items = cardsData?.items ?? [];
 
-  const handleImageUpload = async (cardId: number, file: File) => {
-    const result = await uploadImage.mutateAsync({
-      fileName: file.name,
-      contentType: file.type,
-    });
-
-    const response = await fetch(result.uploadUrl, {
-      method: "PUT",
-      body: file,
-      headers: { "Content-Type": file.type },
-    });
-
-    if (response.ok) {
-      await setImage.mutateAsync({
-        id: cardId,
-        s3Key: result.s3Key,
-        imageUrl: result.publicUrl,
-      });
-    }
-  };
+  const StudyCardMemo = useMemo(() => {
+    return items.map((card) => (
+      <StudyCard
+        key={card.id}
+        card={card}
+        viewMode={viewMode}
+        isEditing={editingCard === card.id}
+        onEdit={() => {
+          if (!getCardPermissions(card.title).canEditCard) return;
+          setSelectedCard(null);
+          setEditingCard(card.id);
+        }}
+        onView={() => setSelectedCard(card)}
+        onDelete={() => {
+          if (!getCardPermissions(card.title).canDeleteCard) return;
+          if (confirm("Are you sure you want to delete this card?")) {
+            deleteCard.mutate({ id: card.id });
+          }
+        }}
+        onSave={(updates) => updateCard.mutate({ id: card.id, ...updates } as Parameters<typeof updateCard.mutate>[0])}
+        onCancel={() => setEditingCard(null)}
+      />
+    ));
+  }, [items, viewMode, editingCard]);
 
   return (
     <div className="space-y-6">
@@ -357,7 +606,7 @@ export function StudyCards() {
       {showCreateForm && (
         <CreateCardForm
           onClose={() => setShowCreateForm(false)}
-          onSubmit={(data) => createCard.mutate(data)}
+          onSubmit={(data) => createCard.mutate(data as Parameters<typeof createCard.mutate>[0])}
           isSubmitting={createCard.isPending}
         />
       )}
@@ -394,28 +643,7 @@ export function StudyCards() {
               : "space-y-3"
           }
         >
-          {items.map((card) => (
-            <StudyCard
-              key={card.id}
-              card={card}
-              viewMode={viewMode}
-              isEditing={editingCard === card.id}
-              onEdit={() => {
-                if (!getCardPermissions(card.title).canEditCard) return;
-                setSelectedCard(null);
-                setEditingCard(card.id);
-              }}
-              onSave={(data) => updateCard.mutate({ id: card.id, ...data })}
-              onDelete={() => {
-                if (!getCardPermissions(card.title).canDeleteCard) return;
-                if (confirm("Delete this study card?")) {
-                  deleteCard.mutate({ id: card.id });
-                }
-              }}
-              onCancel={() => setEditingCard(null)}
-              onView={() => setSelectedCard(card)}
-            />
-          ))}
+          {StudyCardMemo}
         </div>
       )}
     </div>
@@ -423,138 +651,45 @@ export function StudyCards() {
 }
 
 interface StudyCardDetailModalProps {
-  card: any;
+  card: any; // eslint-disable-line @typescript-eslint/no-explicit-any
   onClose: () => void;
 }
 
-function StudyCardDetailModal({ card, onClose }: StudyCardDetailModalProps) {
-  const permissions = getCardPermissions(card.title);
-  const allParsed: Attachment[] = card.attachments ? (JSON.parse(card.attachments) as Attachment[]) : [];
-  const cardImgAttachments = useRef<Attachment[]>(allParsed.filter((a) => a.kind === "card-image"));
+function StudyCardDetailModal({ card: partialCard, onClose }: StudyCardDetailModalProps) {
+  const { data: fullCard } = api.studyCards.getById.useQuery(
+    { id: partialCard.id as number },
+    { enabled: !!partialCard.id },
+  );
+  const card = fullCard ?? partialCard;
 
-  const cardImages: CardImageMeta[] = allParsed
-    .filter((att) => att.kind === "card-image")
-    .map((att) => ({
-      s3Key: att.s3Key,
-      imageUrl: att.url,
-      subfolder: att.subfolder,
-      originalName: att.originalName,
-      fileSize: att.fileSize,
-    }));
+  const permissions = getCardPermissions(card.title);
+  const parsedCardNotes = parseCardNotes(card.notes);
+  const allParsed: Attachment[] = useMemo(() => 
+    card.attachments ? (JSON.parse(card.attachments) as Attachment[]) : [],
+    [card.attachments]
+  );
+  const cardImgAttachments = useMemo(() => 
+    allParsed.filter((a: Attachment) => a.kind === "card-image"),
+    [allParsed]
+  );
+  
+  const cardImages: CardImageMeta[] = useMemo(() => 
+    cardImgAttachments.map((att) => ({
+        s3Key: att.s3Key,
+        imageUrl: att.url,
+        subfolder: att.subfolder,
+        originalName: att.originalName,
+        fileSize: att.fileSize,
+      })),
+    [cardImgAttachments]
+  );
+  
   const galleryImages = cardImages;
 
-  const embedUrl = card.youtubeUrl ? getYoutubeEmbedUrl(card.youtubeUrl) : null;
-
-  const [localAttachments, setLocalAttachments] = useState<Attachment[]>(
-    allParsed.filter((a) => a.kind !== "card-image"),
+  const embedUrl = useMemo(() => 
+    card.youtubeUrl ? getYoutubeEmbedUrl(card.youtubeUrl) : null,
+    [card.youtubeUrl]
   );
-  const [attLinkUrl, setAttLinkUrl] = useState("");
-  const [attLinkName, setAttLinkName] = useState("");
-  const [attUploading, setAttUploading] = useState(false);
-  const [editingIdx, setEditingIdx] = useState<number | null>(null);
-  const [editingName, setEditingName] = useState("");
-
-  const utils = api.useUtils();
-  const updateCard = api.studyCards.update.useMutation({
-    onSuccess: () => { void utils.studyCards.getAll.invalidate(); },
-  });
-  const deleteAttFile = api.studyCards.deleteAttachmentFile.useMutation();
-
-  const persistAttachments = (next: Attachment[]) => {
-    if (!permissions.canEditCard) return;
-    const all = [...cardImgAttachments.current, ...next];
-    void updateCard.mutateAsync({ id: card.id as number, attachments: JSON.stringify(all) });
-  };
-
-  const handleAttachmentUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!permissions.canEditCard) return;
-    const files = e.target.files;
-    if (!files?.length) return;
-    setAttUploading(true);
-    try {
-      for (const file of Array.from(files)) {
-        const res = await fetch("/api/presign-attachment", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            fileName: file.name,
-            contentType: file.type || "application/octet-stream",
-            fileSize: file.size,
-            subfolder: "study-cards/attachments",
-          }),
-        });
-        if (!res.ok) continue;
-        const data = (await res.json()) as {
-          uploadUrl: string; s3Key: string; url: string;
-          fileName: string; originalName: string; mimeType: string;
-          fileSize: number; subfolder: string;
-        };
-        await fetch(data.uploadUrl, {
-          method: "PUT", body: file,
-          headers: { "Content-Type": file.type || "application/octet-stream" },
-        });
-        const newAtt: Attachment = {
-          fileName: data.fileName, originalName: data.originalName,
-          mimeType: data.mimeType, fileSize: data.fileSize,
-          s3Key: data.s3Key, url: data.url, subfolder: data.subfolder,
-          kind: "attachment",
-        };
-        setLocalAttachments((prev) => {
-          const next = [...prev, newAtt];
-          persistAttachments(next);
-          return next;
-        });
-      }
-    } finally {
-      setAttUploading(false);
-      e.target.value = "";
-    }
-  };
-
-  const handleAddAttachmentLink = () => {
-    if (!permissions.canEditCard) return;
-    const url = attLinkUrl.trim();
-    const name = attLinkName.trim() || url;
-    if (!url) return;
-    const newAtt: Attachment = {
-      fileName: name, originalName: name,
-      mimeType: "text/x-url", fileSize: 0,
-      s3Key: `link_${Date.now()}`, url, kind: "attachment",
-    };
-    setLocalAttachments((prev) => {
-      const next = [...prev, newAtt];
-      persistAttachments(next);
-      return next;
-    });
-    setAttLinkUrl("");
-    setAttLinkName("");
-  };
-
-  const handleDeleteAttachment = (idx: number) => {
-    if (!permissions.canEditCard) return;
-    const att = localAttachments[idx]!;
-    if (att.mimeType !== "text/x-url" && !att.s3Key.startsWith("link_")) {
-      void deleteAttFile.mutateAsync({ s3Key: att.s3Key });
-    }
-    setLocalAttachments((prev) => {
-      const next = prev.filter((_, i) => i !== idx);
-      persistAttachments(next);
-      return next;
-    });
-  };
-
-  const handleRenameAttachment = (idx: number) => {
-    if (!permissions.canEditCard) return;
-    const name = editingName.trim();
-    if (!name) { setEditingIdx(null); return; }
-    setLocalAttachments((prev) => {
-      const next = prev.map((a, i) => i === idx ? { ...a, originalName: name } : a);
-      persistAttachments(next);
-      return next;
-    });
-    setEditingIdx(null);
-    setEditingName("");
-  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4" onClick={onClose}>
@@ -577,8 +712,8 @@ function StudyCardDetailModal({ card, onClose }: StudyCardDetailModalProps) {
             <p className="mb-2 text-sm font-medium text-gray-700">Images</p>
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
               {galleryImages.map((img) => (
-                <a key={img.s3Key} href={img.imageUrl} target="_blank" rel="noopener noreferrer" className="relative aspect-video overflow-hidden rounded-lg border border-gray-200 bg-gray-100">
-                  <Image src={img.imageUrl} alt={img.originalName} fill className="object-cover" unoptimized />
+                <a key={img.s3Key} href={img.imageUrl} target="_blank" rel="noopener noreferrer" className="relative aspect-video overflow-hidden rounded-lg border border-gray-200 bg-gray-50">
+                  <Image src={img.imageUrl} alt={img.originalName} fill className="object-contain" unoptimized />
                 </a>
               ))}
             </div>
@@ -643,169 +778,30 @@ function StudyCardDetailModal({ card, onClose }: StudyCardDetailModalProps) {
           </div>
         )}
 
-        {card.notes && (
+        {parsedCardNotes.text && (
           <div className="mt-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
-            {card.notes}
+            {parsedCardNotes.text}
           </div>
         )}
 
         <CardTabsContainer card={card} />
-
-        {/* ── Main Card Attachments ── */}
-        <div className="mt-5 rounded-xl border border-gray-200 p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <p className="text-sm font-semibold text-gray-700">
-              Attachments
-              <span className="ml-1.5 text-xs font-normal text-gray-400">
-                (PDF, image, ZIP, link…)
-              </span>
-            </p>
-            {updateCard.isPending && (
-              <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-400" />
-            )}
-          </div>
-
-          {/* existing attachments */}
-          {localAttachments.length > 0 && (
-            <div className="mb-3 space-y-1.5">
-              {localAttachments.map((att, idx) => {
-                const Icon = getAttachmentIcon(att.mimeType);
-                return (
-                  <div key={att.s3Key} className="flex items-center gap-2 rounded-lg bg-gray-50 px-3 py-2 text-sm">
-                    <Icon className="h-4 w-4 shrink-0 text-violet-500" />
-                    {editingIdx === idx ? (
-                      <>
-                        <input
-                          className="flex-1 rounded border border-violet-300 px-2 py-0.5 text-sm focus:outline-none focus:ring-1 focus:ring-violet-400"
-                          value={editingName}
-                          onChange={(e) => setEditingName(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") { e.preventDefault(); handleRenameAttachment(idx); }
-                            if (e.key === "Escape") { setEditingIdx(null); }
-                          }}
-                          autoFocus
-                        />
-                        <button
-                          type="button"
-                          onClick={() => handleRenameAttachment(idx)}
-                          className="rounded bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700 hover:bg-violet-200"
-                        >
-                          Save
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setEditingIdx(null)}
-                          className="rounded px-1 py-0.5 text-xs text-gray-400 hover:text-gray-600"
-                        >
-                          Cancel
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <a
-                          href={att.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex-1 truncate font-medium text-gray-700 hover:text-violet-600 hover:underline"
-                        >
-                          {att.originalName}
-                        </a>
-                        {att.fileSize > 0 && (
-                          <span className="shrink-0 text-xs text-gray-400">{formatFileSize(att.fileSize)}</span>
-                        )}
-                        {permissions.canEditCard && (
-                          <button
-                            type="button"
-                            title="Rename"
-                            onClick={() => { setEditingIdx(idx); setEditingName(att.originalName); }}
-                            className="shrink-0 rounded p-0.5 text-gray-400 hover:text-violet-600"
-                          >
-                            <Edit className="h-3.5 w-3.5" />
-                          </button>
-                        )}
-                        {permissions.canEditCard && (
-                          <button
-                            type="button"
-                            title="Delete"
-                            onClick={() => handleDeleteAttachment(idx)}
-                            className="shrink-0 rounded p-0.5 text-gray-400 hover:text-red-500"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        )}
-                      </>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {/* add file */}
-          {permissions.canEditCard && (
-            <>
-              <label className={`flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-gray-300 px-3 py-2 text-sm text-gray-500 hover:border-violet-400 hover:text-violet-600 ${attUploading ? "pointer-events-none opacity-60" : ""}`}>
-                {attUploading ? (
-                  <><Loader2 className="h-4 w-4 animate-spin" /><span>Uploading…</span></>
-                ) : (
-                  <><Paperclip className="h-4 w-4" /><span>Upload file (PDF, image, ZIP…)</span></>
-                )}
-                <input
-                  type="file"
-                  multiple
-                  className="hidden"
-                  onChange={handleAttachmentUpload}
-                  disabled={attUploading}
-                />
-              </label>
-
-              {/* add link */}
-              <div className="mt-2 flex items-center gap-2">
-                <Link className="h-4 w-4 shrink-0 text-gray-400" />
-                <input
-                  type="url"
-                  value={attLinkUrl}
-                  onChange={(e) => setAttLinkUrl(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleAddAttachmentLink(); } }}
-                  placeholder="https://…  (Facebook, Drive, website…)"
-                  className="flex-1 rounded border border-gray-200 px-2 py-1 text-sm focus:border-violet-500 focus:outline-none"
-                />
-                <input
-                  type="text"
-                  value={attLinkName}
-                  onChange={(e) => setAttLinkName(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleAddAttachmentLink(); } }}
-                  placeholder="Name (optional)"
-                  className="w-28 rounded border border-gray-200 px-2 py-1 text-sm focus:border-violet-500 focus:outline-none"
-                />
-                <button
-                  type="button"
-                  onClick={handleAddAttachmentLink}
-                  className="shrink-0 rounded bg-violet-100 px-2 py-1 text-xs font-medium text-violet-700 hover:bg-violet-200"
-                >
-                  Add link
-                </button>
-              </div>
-            </>
-          )}
-        </div>
       </div>
     </div>
   );
 }
 
 interface StudyCardProps {
-  card: any;
+  card: any; // eslint-disable-line @typescript-eslint/no-explicit-any
   viewMode: "grid" | "list";
   isEditing: boolean;
   onEdit: () => void;
-  onSave: (data: any) => void;
+  onSave: (data: StudyCardData) => void;
   onDelete: () => void;
   onCancel: () => void;
   onView: () => void;
 }
 
-function StudyCard({
+const StudyCard = memo(function StudyCard({
   card,
   viewMode,
   isEditing,
@@ -816,14 +812,17 @@ function StudyCard({
   onView,
 }: StudyCardProps) {
   const permissions = getCardPermissions(card.title);
+  const parsedCardNotes = parseCardNotes(card.notes);
   const [title, setTitle] = useState(card.title);
   const [description, setDescription] = useState(card.description);
+  const descriptionRef = useRef<HTMLDivElement>(null);
+  const descriptionHtmlRef = useRef(card.description as string);
   const [referenceUrl, setReferenceUrl] = useState(card.referenceUrl ?? "");
   const [youtubeUrl, setYoutubeUrl] = useState(card.youtubeUrl ?? "");
   const [category, setCategory] = useState(card.category ?? "");
   const [difficulty, setDifficulty] = useState(card.difficulty ?? "medium");
   const [tags, setTags] = useState(card.tags ?? "");
-  const [notes, setNotes] = useState(card.notes ?? "");
+  const [notes, setNotes] = useState(parsedCardNotes.text);
   const [isCompleted, setIsCompleted] = useState(card.isCompleted);
   const [rating, setRating] = useState(card.rating ?? 0);
   const [estimatedCost, setEstimatedCost] = useState<number | "">(card.estimatedCost ?? "");
@@ -870,6 +869,14 @@ function StudyCard({
     return images.slice(0, MAX_CARD_IMAGES);
   });
 
+  useEffect(() => {
+    if (isEditing && descriptionRef.current) {
+      const html = getDescriptionEditorHtml(descriptionHtmlRef.current);
+      if (descriptionRef.current.innerHTML !== html) {
+        descriptionRef.current.innerHTML = html;
+      }
+    }
+  }, [isEditing]);
 
   const uploadEditedImage = async (file: File) => {
     setImageUploading(true);
@@ -969,52 +976,63 @@ function StudyCard({
     setEditAttachmentUploading(true);
 
     try {
+      const results = await Promise.all(
+        uploadableFiles.map(async (file) => {
+          try {
+            const presignRes = await fetch("/api/presign-attachment", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                fileName: file.name,
+                contentType: file.type || "application/octet-stream",
+                fileSize: file.size,
+                subfolder: editAttachmentSubfolder,
+              }),
+            });
+
+            if (!presignRes.ok) {
+              const errorData = (await presignRes.json().catch(() => null)) as { error?: string } | null;
+              return { success: false, name: errorData?.error ? `${file.name} (${errorData.error})` : file.name };
+            }
+
+            const presignData = (await presignRes.json()) as Attachment & { uploadUrl: string };
+
+            const uploadRes = await fetch(presignData.uploadUrl, {
+              method: "PUT",
+              body: file,
+              headers: { "Content-Type": file.type || "application/octet-stream", "x-amz-acl": "public-read" },
+            });
+
+            if (!uploadRes.ok) {
+              return { success: false, name: `${file.name} (upload to storage failed)` };
+            }
+
+            return {
+              success: true,
+              data: {
+                fileName: presignData.fileName,
+                originalName: presignData.originalName,
+                mimeType: presignData.mimeType,
+                fileSize: presignData.fileSize,
+                s3Key: presignData.s3Key,
+                url: presignData.url,
+                subfolder: presignData.subfolder,
+              },
+            };
+          } catch {
+            return { success: false, name: file.name };
+          }
+        })
+      );
+
       const uploadedAttachments: Attachment[] = [];
       const failedFiles: string[] = [];
 
-      for (const file of uploadableFiles) {
-        try {
-          const presignRes = await fetch("/api/presign-attachment", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              fileName: file.name,
-              contentType: file.type || "application/octet-stream",
-              fileSize: file.size,
-              subfolder: editAttachmentSubfolder,
-            }),
-          });
-
-          if (!presignRes.ok) {
-            const errorData = (await presignRes.json().catch(() => null)) as { error?: string } | null;
-            failedFiles.push(errorData?.error ? `${file.name} (${errorData.error})` : file.name);
-            continue;
-          }
-
-          const presignData = (await presignRes.json()) as Attachment & { uploadUrl: string };
-
-          const uploadRes = await fetch(presignData.uploadUrl, {
-            method: "PUT",
-            body: file,
-            headers: { "Content-Type": file.type || "application/octet-stream" },
-          });
-
-          if (!uploadRes.ok) {
-            failedFiles.push(`${file.name} (upload to storage failed)`);
-            continue;
-          }
-
-          uploadedAttachments.push({
-            fileName: presignData.fileName,
-            originalName: presignData.originalName,
-            mimeType: presignData.mimeType,
-            fileSize: presignData.fileSize,
-            s3Key: presignData.s3Key,
-            url: presignData.url,
-            subfolder: presignData.subfolder,
-          });
-        } catch {
-          failedFiles.push(file.name);
+      for (const res of results) {
+        if (res.success && res.data) {
+          uploadedAttachments.push(res.data);
+        } else if (!res.success && res.name) {
+          failedFiles.push(res.name);
         }
       }
 
@@ -1036,7 +1054,8 @@ function StudyCard({
   };
 
   const handleSave = () => {
-    const sanitizedDescription = sanitizeDescriptionHtml(description);
+    const latestDescription = descriptionHtmlRef.current || description;
+    const sanitizedDescription = sanitizeDescriptionHtml(latestDescription);
     if (!title.trim() || !getDescriptionPlainText(sanitizedDescription)) return;
 
     const cardImageAttachments: Attachment[] = editedImages.map((img, index) => ({
@@ -1064,7 +1083,7 @@ function StudyCard({
       category: category || undefined,
       difficulty,
       tags: tags || undefined,
-      notes: notes || undefined,
+      notes: serializeCardNotes(notes, parsedCardNotes.noteTable),
       isCompleted,
       rating: rating || undefined,
       estimatedCost: estimatedCost === "" ? undefined : Number(estimatedCost),
@@ -1073,6 +1092,7 @@ function StudyCard({
   };
 
   const embedUrl = card.youtubeUrl ? getYoutubeEmbedUrl(card.youtubeUrl) : null;
+  const hasVisualMedia = Boolean(card.imageUrl || embedUrl);
 
   if (isEditing) {
     return (
@@ -1096,10 +1116,15 @@ function StudyCard({
             className="w-full rounded-lg border border-gray-300 px-3 py-2 font-medium focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
           />
           <div
+            ref={descriptionRef}
             contentEditable
             suppressContentEditableWarning
-            onInput={(e) => setDescription((e.currentTarget as HTMLDivElement).innerHTML)}
-            dangerouslySetInnerHTML={{ __html: getDescriptionEditorHtml(description) }}
+            onInput={(e) => {
+              descriptionHtmlRef.current = (e.currentTarget as HTMLDivElement).innerHTML;
+            }}
+            onBlur={(e) => {
+              setDescription((e.currentTarget as HTMLDivElement).innerHTML);
+            }}
             className="min-h-24 whitespace-pre-wrap rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
           />
           <p className="text-xs text-gray-500">Paste rich text here to keep font colors and line breaks.</p>
@@ -1120,7 +1145,7 @@ function StudyCard({
                 {editedImages.map((img) => (
                   <div key={img.s3Key} className="relative overflow-hidden rounded-lg border border-gray-200">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={img.imageUrl} alt={img.originalName} className="aspect-video w-full object-cover" />
+                    <img src={img.imageUrl} alt={img.originalName} className="aspect-video w-full bg-gray-50 object-contain" />
                     <button
                       type="button"
                       onClick={() => removeEditedImage(img.s3Key)}
@@ -1410,7 +1435,7 @@ function StudyCard({
           </div>
         </div>
       </div>
-      </div>
+    </div>
     );
   }
 
@@ -1426,7 +1451,7 @@ function StudyCard({
               src={card.imageUrl}
               alt={card.title}
               fill
-              className="object-cover"
+              className="object-contain"
               sizes="64px"
               unoptimized
             />
@@ -1559,13 +1584,16 @@ function StudyCard({
       </div>
 
       {/* Image or Video */}
-      <div className="relative aspect-video overflow-hidden rounded-t-xl bg-gray-100">
+      <div
+        className={`relative overflow-hidden rounded-t-xl bg-gray-50 ${hasVisualMedia ? "aspect-video" : ""}`}
+        style={hasVisualMedia ? undefined : { minHeight: "320px" }}
+      >
         {card.imageUrl ? (
           <Image
             src={card.imageUrl}
             alt={card.title}
             fill
-            className="object-cover"
+            className="object-contain"
             sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
             unoptimized
           />
@@ -1577,17 +1605,19 @@ function StudyCard({
             allowFullScreen
           />
         ) : (
-          <div className="flex h-full items-center justify-center bg-gradient-to-br from-violet-50 to-rose-50">
-            <BookOpen className="h-12 w-12 text-violet-300" />
-          </div>
+          <ColorfulTitlePlaceholder title={card.title} />
         )}
       </div>
 
       {/* Content */}
       <div className="p-4">
-        <h3 className="font-semibold text-gray-900 line-clamp-1">{card.title}</h3>
+        {hasVisualMedia ? (
+          <h3 className="font-semibold text-gray-900 line-clamp-1">{card.title}</h3>
+        ) : (
+          <h3 className="sr-only">{card.title}</h3>
+        )}
         <div
-          className="mt-2 whitespace-pre-wrap text-sm text-gray-600 line-clamp-3"
+          className={`whitespace-pre-wrap text-sm text-gray-600 line-clamp-3 ${hasVisualMedia ? "mt-2" : "mt-0"}`}
           dangerouslySetInnerHTML={{ __html: getDescriptionHtml(card.description) }}
         />
 
@@ -1679,9 +1709,9 @@ function StudyCard({
         )}
 
         {/* Notes */}
-        {card.notes && (
+        {parsedCardNotes.text && (
           <div className="mt-3 rounded-lg bg-amber-50 p-2">
-            <p className="text-xs text-amber-800 italic">{card.notes}</p>
+            <p className="text-xs text-amber-800 italic">{parsedCardNotes.text}</p>
           </div>
         )}
 
@@ -1692,118 +1722,11 @@ function StudyCard({
       </div>
     </div>
   );
-}
-
-interface Attachment {
-  fileName: string;
-  originalName: string;
-  mimeType: string;
-  fileSize: number;
-  s3Key: string;
-  url: string;
-  subfolder?: string;
-  kind?: "card-image" | "attachment";
-}
-
-interface CardImageMeta {
-  s3Key: string;
-  imageUrl: string;
-  subfolder?: string;
-  originalName: string;
-  fileSize: number;
-}
-
-const MAX_CARD_IMAGES = 10;
-const MAX_CARD_IMAGE_INPUT_BYTES = 25 * 1024 * 1024;
-const MAX_CARD_IMAGE_INPUT_LABEL = "25 MB";
-const MAX_ATTACHMENT_SIZE_BYTES = 12 * 1024 * 1024;
-const MAX_ATTACHMENT_SIZE_LABEL = "12 MB";
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-export async function compressCardImage(file: File): Promise<File> {
-  if (!file.type.startsWith("image/")) {
-    throw new Error("Only image files are allowed.");
-  }
-
-  if (file.size > MAX_CARD_IMAGE_INPUT_BYTES) {
-    throw new Error(`Each image must be ${MAX_CARD_IMAGE_INPUT_LABEL} or smaller before upload.`);
-  }
-
-  if (typeof window === "undefined") {
-    return file;
-  }
-
-  const bitmap = await createImageBitmap(file);
-  const maxDimension = 1600;
-  const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
-  const width = Math.max(1, Math.round(bitmap.width * scale));
-  const height = Math.max(1, Math.round(bitmap.height * scale));
-
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-
-  const context = canvas.getContext("2d");
-  if (!context) {
-    bitmap.close();
-    throw new Error("Image compression is not supported in this browser.");
-  }
-
-  context.drawImage(bitmap, 0, 0, width, height);
-  bitmap.close();
-
-  let quality = 0.82;
-  let blob = await new Promise<Blob | null>((resolve) => {
-    canvas.toBlob((result) => resolve(result), "image/webp", quality);
-  });
-
-  while (blob && blob.size > 350 * 1024 && quality > 0.4) {
-    quality -= 0.08;
-    blob = await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob((result) => resolve(result), "image/webp", quality);
-    });
-  }
-
-  if (!blob) {
-    throw new Error("Image compression failed.");
-  }
-
-  const compressedName = file.name.replace(/\.[^.]+$/, "") || `image-${Date.now()}`;
-  return new File([blob], `${compressedName}.webp`, {
-    type: "image/webp",
-    lastModified: Date.now(),
-  });
-}
-
-function getAttachmentIcon(mimeType: string) {
-  if (!mimeType) return FileText;
-  
-  const type = mimeType.toLowerCase();
-  if (type === "text/x-url") return ExternalLink;
-  if (type.startsWith("image/")) return ImageIcon;
-  if (type.startsWith("video/")) return FileVideo;
-  if (type.startsWith("audio/")) return FileAudio;
-  if (
-    type.includes("zip") || 
-    type.includes("tar") || 
-    type.includes("rar") ||
-    type.includes("7z") ||
-    type.includes("compressed")
-  ) {
-    return FileArchive;
-  }
-  
-  return FileText;
-}
+});
 
 interface CreateCardFormProps {
   onClose: () => void;
-  onSubmit: (data: any) => void;
+  onSubmit: (data: StudyCardData) => void;
   isSubmitting: boolean;
 }
 
@@ -1811,15 +1734,9 @@ function CreateCardForm({ onClose, onSubmit, isSubmitting }: CreateCardFormProps
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [referenceUrl, setReferenceUrl] = useState("");
-  const [youtubeUrl, setYoutubeUrl] = useState("");
   const [category, setCategory] = useState("");
-  const [difficulty, setDifficulty] = useState("medium");
   const [tags, setTags] = useState("");
   const [notes, setNotes] = useState("");
-  const [groupCalendar, setGroupCalendar] = useState("");
-  const [expenses, setExpenses] = useState("");
-  const [estimatedCost, setEstimatedCost] = useState<number | "">("");
-  const [investDate, setInvestDate] = useState("");
   const [subfolder, setSubfolder] = useState("study-cards/images");
 
   const [cardImages, setCardImages] = useState<CardImageMeta[]>([]);
@@ -1990,7 +1907,7 @@ function CreateCardForm({ onClose, onSubmit, isSubmitting }: CreateCardFormProps
           const uploadRes = await fetch(presignData.uploadUrl, {
             method: "PUT",
             body: file,
-            headers: { "Content-Type": file.type || "application/octet-stream" },
+            headers: { "Content-Type": file.type || "application/octet-stream", "x-amz-acl": "public-read" },
           });
 
           if (!uploadRes.ok) {
@@ -2052,8 +1969,9 @@ function CreateCardForm({ onClose, onSubmit, isSubmitting }: CreateCardFormProps
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!title.trim()) return;
+
     const sanitizedDescription = sanitizeDescriptionHtml(description);
-    if (!title.trim() || !getDescriptionPlainText(sanitizedDescription)) return;
 
     const cardImageAttachments: Attachment[] = cardImages.map((img, index) => ({
       fileName: `card-image-${index + 1}.webp`,
@@ -2069,20 +1987,15 @@ function CreateCardForm({ onClose, onSubmit, isSubmitting }: CreateCardFormProps
 
     onSubmit({
       title: title.trim(),
-      description: sanitizedDescription,
+      description: sanitizedDescription || undefined,
       referenceUrl: referenceUrl.trim() || undefined,
-      youtubeUrl: youtubeUrl.trim() || undefined,
       imageUrl: cardImages[0]?.imageUrl,
       imageS3Key: cardImages[0]?.s3Key,
       attachments: combinedAttachments.length > 0 ? JSON.stringify(combinedAttachments) : undefined,
       category: category.trim() || undefined,
-      difficulty,
+      difficulty: "medium",
       tags: tags.trim() || undefined,
-      notes: notes.trim() || undefined,
-      groupCalendar: groupCalendar.trim() || undefined,
-      expenses: expenses.trim() || undefined,
-      estimatedCost: estimatedCost === "" ? undefined : Number(estimatedCost),
-      investDate: investDate || undefined,
+      notes: serializeCardNotes(notes, null),
     });
   };
 
@@ -2115,7 +2028,7 @@ function CreateCardForm({ onClose, onSubmit, isSubmitting }: CreateCardFormProps
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Description *
+              Description (optional)
             </label>
             <textarea
               value={description}
@@ -2127,10 +2040,9 @@ function CreateCardForm({ onClose, onSubmit, isSubmitting }: CreateCardFormProps
                   setDescription(html);
                 }
               }}
-              placeholder="Enter description or paste rich text..."
+              placeholder="Enter description (optional) or paste rich text..."
               rows={4}
               className="w-full whitespace-pre-wrap rounded-lg border border-gray-300 px-3 py-2 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
-              required
             />
             <p className="mt-1 text-xs text-gray-500">Paste rich text to preserve colors and paragraph spacing.</p>
           </div>
@@ -2159,7 +2071,7 @@ function CreateCardForm({ onClose, onSubmit, isSubmitting }: CreateCardFormProps
                 {cardImages.map((img) => (
                   <div key={img.s3Key} className="relative overflow-hidden rounded-lg border border-gray-200">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={img.imageUrl} alt={img.originalName} className="aspect-video w-full object-cover" />
+                    <img src={img.imageUrl} alt={img.originalName} className="aspect-video w-full bg-gray-50 object-contain" />
                     <button
                       type="button"
                       onClick={() => removeCardImage(img.s3Key)}
@@ -2231,45 +2143,6 @@ function CreateCardForm({ onClose, onSubmit, isSubmitting }: CreateCardFormProps
               onChange={(e) => setReferenceUrl(e.target.value)}
               placeholder="https://example.com/article"
               type="url"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              YouTube URL
-            </label>
-            <input
-              value={youtubeUrl}
-              onChange={(e) => setYoutubeUrl(e.target.value)}
-              placeholder="https://youtube.com/watch?v=..."
-              type="url"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Estimated Cost
-            </label>
-            <input
-              value={estimatedCost}
-              onChange={(e) => setEstimatedCost(e.target.value === "" ? "" : Number(e.target.value))}
-              placeholder="Enter estimated cost (e.g., 100)"
-              type="number"
-              min="0"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Invest Date
-            </label>
-            <input
-              value={investDate}
-              onChange={(e) => setInvestDate(e.target.value)}
-              type="date"
               className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
             />
           </div>
@@ -2385,32 +2258,16 @@ function CreateCardForm({ onClose, onSubmit, isSubmitting }: CreateCardFormProps
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Category
-              </label>
-              <input
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                placeholder="e.g., Science, Math, History"
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Difficulty
-              </label>
-              <select
-                value={difficulty}
-                onChange={(e) => setDifficulty(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
-              >
-                <option value="easy">Easy</option>
-                <option value="medium">Medium</option>
-                <option value="hard">Hard</option>
-              </select>
-            </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Category
+            </label>
+            <input
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              placeholder="e.g., Science, Math, History"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+            />
           </div>
 
           <div>
@@ -2441,33 +2298,6 @@ function CreateCardForm({ onClose, onSubmit, isSubmitting }: CreateCardFormProps
             />
           </div>
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Group Calendar
-              </label>
-              <textarea
-                value={groupCalendar}
-                onChange={(e) => setGroupCalendar(e.target.value)}
-                placeholder="Group schedule, deadlines, reminders..."
-                rows={3}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Expense
-              </label>
-              <textarea
-                value={expenses}
-                onChange={(e) => setExpenses(e.target.value)}
-                placeholder="Card-specific expenses and payment notes..."
-                rows={3}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
-              />
-            </div>
-          </div>
-
           <div className="flex justify-end gap-3 pt-4">
             <button
               type="button"
@@ -2482,8 +2312,7 @@ function CreateCardForm({ onClose, onSubmit, isSubmitting }: CreateCardFormProps
                 isSubmitting ||
                 imageUploading ||
                 attachmentUploading ||
-                !title.trim() ||
-                !getDescriptionPlainText(description)
+                !title.trim()
               }
               className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >

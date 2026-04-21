@@ -52,51 +52,58 @@ function parseAttachments(raw: string | null): Attachment[] {
 }
 
 async function uploadAttachments(files: File[]): Promise<{ uploaded: Attachment[]; failed: string[] }> {
+  const results = await Promise.all(
+    files.map(async (file) => {
+      try {
+        const presignRes = await fetch("/api/presign-attachment", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            fileName: file.name,
+            contentType: file.type || "application/octet-stream",
+            fileSize: file.size,
+            subfolder: "study-cards/post-attachments",
+          }),
+        });
+
+        if (!presignRes.ok) return { success: false, name: file.name };
+
+        const presignData = (await presignRes.json()) as Attachment & { uploadUrl: string };
+
+        const uploadRes = await fetch(presignData.uploadUrl, {
+          method: "PUT",
+          body: file,
+          headers: { "Content-Type": file.type || "application/octet-stream", "x-amz-acl": "public-read" },
+        });
+
+        if (!uploadRes.ok) return { success: false, name: file.name };
+
+        return {
+          success: true,
+          data: {
+            fileName: presignData.fileName,
+            originalName: presignData.originalName,
+            mimeType: presignData.mimeType,
+            fileSize: presignData.fileSize,
+            s3Key: presignData.s3Key,
+            url: presignData.url,
+            subfolder: presignData.subfolder,
+          },
+        };
+      } catch {
+        return { success: false, name: file.name };
+      }
+    })
+  );
+
   const uploaded: Attachment[] = [];
   const failed: string[] = [];
 
-  for (const file of files) {
-    try {
-      const presignRes = await fetch("/api/presign-attachment", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fileName: file.name,
-          contentType: file.type || "application/octet-stream",
-          fileSize: file.size,
-          subfolder: "study-cards/post-attachments",
-        }),
-      });
-
-      if (!presignRes.ok) {
-        failed.push(file.name);
-        continue;
-      }
-
-      const presignData = (await presignRes.json()) as Attachment & { uploadUrl: string };
-
-      const uploadRes = await fetch(presignData.uploadUrl, {
-        method: "PUT",
-        body: file,
-        headers: { "Content-Type": file.type || "application/octet-stream" },
-      });
-
-      if (!uploadRes.ok) {
-        failed.push(file.name);
-        continue;
-      }
-
-      uploaded.push({
-        fileName: presignData.fileName,
-        originalName: presignData.originalName,
-        mimeType: presignData.mimeType,
-        fileSize: presignData.fileSize,
-        s3Key: presignData.s3Key,
-        url: presignData.url,
-        subfolder: presignData.subfolder,
-      });
-    } catch {
-      failed.push(file.name);
+  for (const res of results) {
+    if (res.success && res.data) {
+      uploaded.push(res.data);
+    } else if (!res.success && res.name) {
+      failed.push(res.name);
     }
   }
 

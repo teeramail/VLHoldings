@@ -1,5 +1,5 @@
 export const brand = {
-  name: "aaateera",
+  name: "VLHoldings",
   shortName: "V",
   tagline: "Cards of work",
   sectionTitle: "Cards of work",

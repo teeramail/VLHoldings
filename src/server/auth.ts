@@ -47,7 +47,7 @@ export const authConfig = {
       console.log("[NEXTAUTH DEBUG]", code, message);
     },
   },
-  secret: env.AUTH_SECRET,
+  secret: env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET,
   adapter: DrizzleAdapter(db, {
     usersTable: users,
     accountsTable: accounts,

@@ -183,11 +183,12 @@ export const studyCardsRouter = createTRPCRouter({
         });
       }
 
-      // Resolve default visibility: explicit input > project settings default > private
+      // Resolve default visibility: explicit input > project settings default > mode-based
       const [settings] = await ctx.db.select().from(projectSettings).limit(1);
+      const fallbackVisibility: CardVisibility = mode === "public" ? "public" : "private";
       let visibility: CardVisibility =
         input.visibility ??
-        ((settings?.defaultCardVisibility ?? "private") as CardVisibility);
+        ((settings?.defaultCardVisibility ?? fallbackVisibility) as CardVisibility);
       // Anonymous-created cards are forced to `public`.
       if (!isSignedIn) visibility = "public";
 

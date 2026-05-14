@@ -1,5 +1,7 @@
+import { projectSettingsRouter } from "~/server/api/routers/project-settings";
 import { studyCardItemsRouter } from "~/server/api/routers/study-card-items";
 import { studyCardPostsRouter } from "~/server/api/routers/study-card-posts";
+import { studyCardSharesRouter } from "~/server/api/routers/study-card-shares";
 import { studyCardsRouter } from "~/server/api/routers/study-cards";
 import { createCallerFactory, createTRPCRouter } from "~/server/api/trpc";
 
@@ -12,6 +14,8 @@ export const appRouter = createTRPCRouter({
   studyCardItems: studyCardItemsRouter,
   studyCardPosts: studyCardPostsRouter,
   studyCards: studyCardsRouter,
+  studyCardShares: studyCardSharesRouter,
+  projectSettings: projectSettingsRouter,
 });
 
 // export type definition of API

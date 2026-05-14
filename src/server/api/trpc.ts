@@ -7,11 +7,23 @@
  * need to use are documented accordingly near the end.
  */
 
-import { initTRPC } from "@trpc/server";
+import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
 import { ZodError } from "zod";
 
+import { auth } from "~/server/auth";
 import { db } from "~/server/db";
+
+function readCookie(headers: Headers, name: string): string | undefined {
+  const cookie = headers.get("cookie");
+  if (!cookie) return undefined;
+  const parts = cookie.split(";");
+  for (const part of parts) {
+    const [k, v] = part.trim().split("=");
+    if (k === name) return decodeURIComponent(v ?? "");
+  }
+  return undefined;
+}
 
 /**
  * 1. CONTEXT
@@ -26,8 +38,20 @@ import { db } from "~/server/db";
  * @see https://trpc.io/docs/server/context
  */
 export const createTRPCContext = async (opts: { headers: Headers }) => {
+  const session = await auth().catch(() => null);
+  const userEmail = session?.user?.email?.toLowerCase() ?? null;
+  const userId = session?.user?.id ?? null;
+  const ownerCookie = readCookie(opts.headers, "dashboard_session");
+  const ownerEmail = process.env.VALID_EMAIL?.trim().toLowerCase();
+  const isOwner =
+    ownerCookie === "authenticated" ||
+    (!!ownerEmail && !!userEmail && userEmail === ownerEmail);
   return {
     db,
+    session,
+    userEmail,
+    userId,
+    isOwner,
     ...opts,
   };
 };
@@ -107,4 +131,26 @@ const timingMiddleware = t.middleware(async ({ next, path }) => {
  * are logged in.
  */
 export const publicProcedure = t.procedure.use(timingMiddleware);
+
+/**
+ * Procedure that requires either a Google session (via NextAuth) or the
+ * project-owner password cookie.
+ */
+export const authedProcedure = publicProcedure.use(async ({ ctx, next }) => {
+  if (!ctx.userEmail && !ctx.isOwner) {
+    throw new TRPCError({ code: "UNAUTHORIZED", message: "Sign in required" });
+  }
+  return next({ ctx });
+});
+
+/**
+ * Procedure that requires the project-owner password cookie. Used for
+ * admin-only settings mutations.
+ */
+export const ownerProcedure = publicProcedure.use(async ({ ctx, next }) => {
+  if (!ctx.isOwner) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Owner only" });
+  }
+  return next({ ctx });
+});
 

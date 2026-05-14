@@ -29,6 +29,7 @@ import {
   FileArchive,
   FileAudio,
   Link,
+  Share2,
   Calendar,
   Clock,
   DollarSign,
@@ -36,6 +37,7 @@ import {
 import { api } from "~/trpc/react";
 import { getCardPermissions } from "~/config/card-settings";
 import { CardTabsContainer } from "./card-tabs-container";
+import { ShareCardDialog } from "./share-card-dialog";
 import { format } from "date-fns";
 import { CardDiscussion } from "./card-discussion";
 
@@ -63,8 +65,8 @@ interface StudyCardData {
   description?: string;
   referenceUrl?: string;
   youtubeUrl?: string;
-  imageUrl?: string;
-  imageS3Key?: string;
+  imageUrl?: string | null;
+  imageS3Key?: string | null;
   attachments?: string;
   groupCalendar?: string;
   expenses?: string;
@@ -419,6 +421,7 @@ export function StudyCards() {
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [editingCard, setEditingCard] = useState<number | null>(null);
   const [selectedCard, setSelectedCard] = useState<any | null>(null);
+  const [sharingCardId, setSharingCardId] = useState<number | null>(null);
 
   const { data: cardsData, isLoading } = api.studyCards.getAll.useQuery({
     search: search || undefined,
@@ -484,6 +487,7 @@ export function StudyCards() {
             deleteCard.mutate({ id: card.id });
           }
         }}
+        onShare={() => setSharingCardId(card.id)}
         onSave={(updates) => updateCard.mutate({ id: card.id, ...updates } as Parameters<typeof updateCard.mutate>[0])}
         onCancel={() => setEditingCard(null)}
       />
@@ -618,6 +622,13 @@ export function StudyCards() {
         />
       )}
 
+      {sharingCardId !== null && (
+        <ShareCardDialog
+          cardId={sharingCardId}
+          onClose={() => setSharingCardId(null)}
+        />
+      )}
+
       {/* Loading */}
       {isLoading && (
         <div className="flex items-center justify-center py-20">
@@ -670,6 +681,10 @@ function StudyCardDetailModal({ card: partialCard, onClose }: StudyCardDetailMod
   );
   const cardImgAttachments = useMemo(() => 
     allParsed.filter((a: Attachment) => a.kind === "card-image"),
+    [allParsed]
+  );
+  const fileAttachments = useMemo(() =>
+    allParsed.filter((a: Attachment) => a.kind !== "card-image"),
     [allParsed]
   );
   
@@ -750,6 +765,34 @@ function StudyCardDetailModal({ card: partialCard, onClose }: StudyCardDetailMod
           dangerouslySetInnerHTML={{ __html: getDescriptionHtml(card.description) }}
         />
 
+        {fileAttachments.length > 0 && (
+          <div className="mb-5 mt-5">
+            <p className="mb-2 text-sm font-medium text-gray-700">
+              Attachments ({fileAttachments.length})
+            </p>
+            <div className="space-y-1.5 rounded-lg border border-gray-200 bg-gray-50 p-3">
+              {fileAttachments.map((att: Attachment) => {
+                const Icon = getAttachmentIcon(att.mimeType);
+                return (
+                  <a
+                    key={att.s3Key}
+                    href={att.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="flex items-center gap-2 rounded-lg bg-white px-3 py-2 text-sm shadow-sm transition hover:bg-violet-50 hover:shadow"
+                  >
+                    <Icon className="h-4 w-4 shrink-0 text-violet-500" />
+                    <span className="flex-1 truncate text-gray-800">{att.originalName}</span>
+                    <span className="shrink-0 text-xs text-gray-400">{formatFileSize(att.fileSize)}</span>
+                    <Download className="h-4 w-4 shrink-0 text-gray-400" />
+                  </a>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {card.estimatedCost !== null && card.estimatedCost !== undefined && card.estimatedCost > 0 && (
           <div className="mt-4 flex items-center gap-2 text-sm">
             <span className="font-medium text-gray-700">Estimated Cost:</span>
@@ -799,6 +842,7 @@ interface StudyCardProps {
   onDelete: () => void;
   onCancel: () => void;
   onView: () => void;
+  onShare: () => void;
 }
 
 const StudyCard = memo(function StudyCard({
@@ -810,6 +854,7 @@ const StudyCard = memo(function StudyCard({
   onDelete,
   onCancel,
   onView,
+  onShare,
 }: StudyCardProps) {
   const permissions = getCardPermissions(card.title);
   const parsedCardNotes = parseCardNotes(card.notes);
@@ -857,9 +902,9 @@ const StudyCard = memo(function StudyCard({
 
   const [editedImages, setEditedImages] = useState<CardImageMeta[]>(() => {
     const images: CardImageMeta[] = [...persistedCardImages];
-    if (card.imageUrl && card.imageS3Key && !images.some((img) => img.s3Key === card.imageS3Key)) {
+    if (card.imageUrl && !images.some((img) => img.imageUrl === card.imageUrl)) {
       images.unshift({
-        s3Key: card.imageS3Key,
+        s3Key: card.imageS3Key ?? card.imageUrl,
         imageUrl: card.imageUrl,
         subfolder: "study-cards/images",
         originalName: "Card image",
@@ -916,17 +961,12 @@ const StudyCard = memo(function StudyCard({
   };
 
   const uploadManyEditedImages = async (files: File[]) => {
-    const remaining = MAX_CARD_IMAGES - editedImages.length;
-    if (remaining <= 0) {
-      alert(`You can upload up to ${MAX_CARD_IMAGES} images per card.`);
-      return;
-    }
-
-    for (const file of files.slice(0, remaining)) {
-      const uploaded = await uploadEditedImage(file);
-      if (uploaded) {
-        setEditedImages((prev) => [...prev, uploaded]);
-      }
+    const file = files[0];
+    if (!file) return;
+    const uploaded = await uploadEditedImage(file);
+    if (uploaded) {
+      // Replace any existing main image with the new one
+      setEditedImages([uploaded]);
     }
   };
 
@@ -1056,7 +1096,7 @@ const StudyCard = memo(function StudyCard({
   const handleSave = () => {
     const latestDescription = descriptionHtmlRef.current || description;
     const sanitizedDescription = sanitizeDescriptionHtml(latestDescription);
-    if (!title.trim() || !getDescriptionPlainText(sanitizedDescription)) return;
+    if (!title.trim()) return;
 
     const cardImageAttachments: Attachment[] = editedImages.map((img, index) => ({
       fileName: `card-image-${index + 1}.webp`,
@@ -1074,8 +1114,8 @@ const StudyCard = memo(function StudyCard({
       description: sanitizedDescription,
       referenceUrl: referenceUrl || undefined,
       youtubeUrl: youtubeUrl || undefined,
-      imageUrl: editedImages[0]?.imageUrl,
-      imageS3Key: editedImages[0]?.s3Key,
+      imageUrl: editedImages[0]?.imageUrl ?? null,
+      imageS3Key: editedImages[0]?.s3Key ?? null,
       attachments:
         [...editedAttachments, ...cardImageAttachments].length > 0
           ? JSON.stringify([...editedAttachments, ...cardImageAttachments])
@@ -1129,68 +1169,83 @@ const StudyCard = memo(function StudyCard({
           />
           <p className="text-xs text-gray-500">Paste rich text here to keep font colors and line breaks.</p>
           <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700">Card Image</label>
-            <div className="mb-2 flex items-center gap-2">
-              <Folder className="h-4 w-4 text-gray-400" />
-              <input
-                type="text"
-                value={imageSubfolder}
-                onChange={(e) => setImageSubfolder(e.target.value)}
-                placeholder="Folder path (e.g., study-cards/images)"
-                className="flex-1 rounded border border-gray-200 px-2 py-1 text-sm focus:border-violet-500 focus:outline-none"
-              />
-            </div>
-            {editedImages.length > 0 && (
-              <div className="mb-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                {editedImages.map((img) => (
-                  <div key={img.s3Key} className="relative overflow-hidden rounded-lg border border-gray-200">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={img.imageUrl} alt={img.originalName} className="aspect-video w-full bg-gray-50 object-contain" />
-                    <button
-                      type="button"
-                      onClick={() => removeEditedImage(img.s3Key)}
-                      className="absolute right-1 top-1 rounded-full bg-white/90 p-1 shadow hover:bg-white"
-                    >
-                      <X className="h-3 w-3 text-gray-700" />
-                    </button>
-                  </div>
-                ))}
+            <label className="mb-1 block text-sm font-medium text-gray-700">Main Image</label>
+            {editedImages[0] ? (
+              <div className="space-y-2">
+                <div className="relative overflow-hidden rounded-lg border border-gray-200 bg-gray-50">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={editedImages[0].imageUrl}
+                    alt={editedImages[0].originalName}
+                    className="aspect-video w-full object-contain"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <label
+                    className={`inline-flex cursor-pointer items-center gap-2 rounded-lg border border-violet-300 bg-violet-50 px-3 py-1.5 text-xs font-semibold text-violet-700 hover:bg-violet-100 ${
+                      imageUploading ? "pointer-events-none opacity-60" : ""
+                    }`}
+                  >
+                    {imageUploading ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" /> Uploading...
+                      </>
+                    ) : (
+                      <>
+                        <ImageIcon className="h-3.5 w-3.5" /> Change image
+                      </>
+                    )}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={handleEditImageUpload}
+                      disabled={imageUploading}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setEditedImages([])}
+                    disabled={imageUploading}
+                    className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-100 disabled:opacity-60"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" /> Delete image
+                  </button>
+                </div>
               </div>
+            ) : (
+              <label
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsEditImageDragOver(true);
+                }}
+                onDragLeave={() => setIsEditImageDragOver(false)}
+                onDrop={handleEditImageDrop}
+                className={`flex cursor-pointer items-center justify-center gap-2 rounded-lg border-2 border-dashed p-4 text-sm transition-colors ${
+                  isEditImageDragOver
+                    ? "border-violet-500 bg-violet-50 text-violet-700"
+                    : "border-gray-300 text-gray-500 hover:border-violet-400 hover:bg-violet-50/50"
+                }`}
+              >
+                {imageUploading ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" /> Uploading image...
+                  </>
+                ) : (
+                  <>
+                    <ImageIcon className="h-4 w-4" /> Drag & drop or upload main image
+                  </>
+                )}
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={handleEditImageUpload}
+                  disabled={imageUploading}
+                />
+              </label>
             )}
-            <label
-              onDragOver={(e) => {
-                e.preventDefault();
-                setIsEditImageDragOver(true);
-              }}
-              onDragLeave={() => setIsEditImageDragOver(false)}
-              onDrop={handleEditImageDrop}
-              className={`flex cursor-pointer items-center justify-center gap-2 rounded-lg border-2 border-dashed p-3 text-sm transition-colors ${
-                isEditImageDragOver
-                  ? "border-violet-500 bg-violet-50 text-violet-700"
-                  : "border-gray-300 text-gray-500 hover:border-violet-400 hover:bg-violet-50/50"
-              }`}
-            >
-              {imageUploading ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Uploading image...
-                </>
-              ) : (
-                <>
-                  <ImageIcon className="h-4 w-4" />
-                  Drag & drop or upload images ({editedImages.length}/{MAX_CARD_IMAGES})
-                </>
-              )}
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                className="hidden"
-                onChange={handleEditImageUpload}
-                disabled={imageUploading || editedImages.length >= MAX_CARD_IMAGES}
-              />
-            </label>
-            <p className="text-xs text-gray-500">Accepts mobile photos up to {MAX_CARD_IMAGE_INPUT_LABEL} each, then compresses before upload.</p>
+            <p className="mt-1 text-xs text-gray-500">Accepts mobile photos up to {MAX_CARD_IMAGE_INPUT_LABEL}, compressed before upload.</p>
           </div>
           <input
             value={referenceUrl}
@@ -1515,6 +1570,16 @@ const StudyCard = memo(function StudyCard({
               <button
                 onClick={(e) => {
                   e.stopPropagation();
+                  onShare();
+                }}
+                className="rounded-lg p-2 text-violet-600 hover:bg-violet-50"
+                aria-label="Share card"
+              >
+                <Share2 className="h-4 w-4" />
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
                   onEdit();
                 }}
                 className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
@@ -1545,6 +1610,16 @@ const StudyCard = memo(function StudyCard({
       {/* Header with actions */}
       {permissions.canEditCard && (
         <div className="absolute right-2 top-2 z-10 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onShare();
+            }}
+            className="rounded-full bg-white/90 p-1.5 shadow-sm hover:bg-white"
+            aria-label="Share card"
+          >
+            <Share2 className="h-3.5 w-3.5 text-violet-600" />
+          </button>
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -1664,6 +1739,12 @@ const StudyCard = memo(function StudyCard({
               <ExternalLink className="h-3 w-3" />
               Link
             </a>
+          )}
+          {visibleAttachments.length > 0 && (
+            <span className="flex items-center gap-1 rounded-full bg-orange-100 px-2 py-1 font-medium text-orange-700">
+              <Paperclip className="h-3 w-3" />
+              {visibleAttachments.length} file{visibleAttachments.length > 1 ? "s" : ""}
+            </span>
           )}
         </div>
 

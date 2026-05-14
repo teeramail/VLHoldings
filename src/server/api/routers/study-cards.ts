@@ -1,10 +1,49 @@
-import { eq, desc, and, sql } from "drizzle-orm";
+import { eq, desc, and, sql, or } from "drizzle-orm";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { getCardPermissions } from "~/config/card-settings";
-import { createTRPCRouter, publicProcedure } from "~/server/api/trpc";
-import { studyCards } from "~/server/db/schema";
+import {
+  createTRPCRouter,
+  publicProcedure,
+} from "~/server/api/trpc";
+import {
+  CARD_VISIBILITIES,
+  projectSettings,
+  studyCards,
+  studyCardShares,
+  type CardVisibility,
+} from "~/server/db/schema";
+import { env } from "~/env";
 import { deleteS3Object } from "~/server/s3";
+import {
+  getProjectAccessMode,
+  allowsAnonymousCreate,
+  allowsAnonymousView,
+} from "~/server/access-mode";
+import {
+  generateShareToken,
+  resolveCardAccess,
+} from "~/server/card-access";
+
+function cardVisibilityCondition(viewer: {
+  userId: string | null;
+  email: string | null;
+  isOwner: boolean;
+}) {
+  if (viewer.isOwner) return undefined; // no filter
+  const clauses = [eq(studyCards.visibility, "public")];
+  if (viewer.email) {
+    clauses.push(eq(studyCards.visibility, "signed_in"));
+    // Cards the viewer owns
+    if (viewer.userId) {
+      clauses.push(eq(studyCards.ownerUserId, viewer.userId));
+    }
+    // Cards explicitly shared to this email
+    const sharedCardIds = sql`${studyCards.id} IN (SELECT ${studyCardShares.cardId} FROM ${studyCardShares} WHERE ${studyCardShares.email} = ${viewer.email})`;
+    clauses.push(sharedCardIds as unknown as typeof clauses[number]);
+  }
+  return or(...clauses);
+}
 
 export const studyCardsRouter = createTRPCRouter({
   getAll: publicProcedure
@@ -19,7 +58,23 @@ export const studyCardsRouter = createTRPCRouter({
       })
     )
     .query(async ({ ctx, input }) => {
+      const mode = getProjectAccessMode();
+      // Enforce project access mode at the query level:
+      if (!ctx.isOwner && !ctx.userEmail && !allowsAnonymousView(mode)) {
+        throw new TRPCError({
+          code: "UNAUTHORIZED",
+          message: "Sign-in required",
+        });
+      }
+
       const conditions = [];
+
+      const visibilityCond = cardVisibilityCondition({
+        userId: ctx.userId,
+        email: ctx.userEmail,
+        isOwner: ctx.isOwner,
+      });
+      if (visibilityCond) conditions.push(visibilityCond);
 
       if (input.category) {
         conditions.push(eq(studyCards.category, input.category));
@@ -52,6 +107,12 @@ export const studyCardsRouter = createTRPCRouter({
           isCompleted: studyCards.isCompleted,
           rating: studyCards.rating,
           imageUrl: studyCards.imageUrl,
+          youtubeUrl: studyCards.youtubeUrl,
+          referenceUrl: studyCards.referenceUrl,
+          attachments: studyCards.attachments,
+          tags: studyCards.tags,
+          notes: studyCards.notes,
+          description: studyCards.description,
           createdAt: studyCards.createdAt,
           investDate: studyCards.investDate,
           estimatedCost: studyCards.estimatedCost,
@@ -78,7 +139,17 @@ export const studyCardsRouter = createTRPCRouter({
         .from(studyCards)
         .where(eq(studyCards.id, input.id))
         .limit(1);
-      return card[0] ?? null;
+      const row = card[0];
+      if (!row) return null;
+      const access = await resolveCardAccess(
+        { ownerUserId: row.ownerUserId, visibility: row.visibility },
+        { userId: ctx.userId, email: ctx.userEmail, isOwner: ctx.isOwner },
+        row.id,
+      );
+      if (!access.canView) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "No access" });
+      }
+      return { ...row, _access: access };
     }),
 
   create: publicProcedure
@@ -99,9 +170,27 @@ export const studyCardsRouter = createTRPCRouter({
         notes: z.string().optional(),
         estimatedCost: z.number().min(0).optional(),
         investDate: z.string().optional(),
+        visibility: z.enum(CARD_VISIBILITIES).optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
+      const mode = getProjectAccessMode();
+      const isSignedIn = Boolean(ctx.userEmail) || ctx.isOwner;
+      if (!isSignedIn && !allowsAnonymousCreate(mode)) {
+        throw new TRPCError({
+          code: "UNAUTHORIZED",
+          message: "Sign-in required to create cards",
+        });
+      }
+
+      // Resolve default visibility: explicit input > project settings default > private
+      const [settings] = await ctx.db.select().from(projectSettings).limit(1);
+      let visibility: CardVisibility =
+        input.visibility ??
+        ((settings?.defaultCardVisibility ?? "private") as CardVisibility);
+      // Anonymous-created cards are forced to `public`.
+      if (!isSignedIn) visibility = "public";
+
       const result = await ctx.db
         .insert(studyCards)
         .values({
@@ -120,6 +209,9 @@ export const studyCardsRouter = createTRPCRouter({
           notes: input.notes ?? null,
           estimatedCost: input.estimatedCost ?? 0,
           investDate: input.investDate ?? null,
+          ownerUserId: ctx.userId,
+          visibility,
+          shareToken: visibility === "public" ? generateShareToken() : null,
         })
         .returning();
       return result[0];
@@ -130,11 +222,11 @@ export const studyCardsRouter = createTRPCRouter({
       z.object({
         id: z.number(),
         title: z.string().min(1).max(255).optional(),
-        description: z.string().min(1).optional(),
+        description: z.string().optional(),
         referenceUrl: z.string().url().optional(),
         youtubeUrl: z.string().url().optional(),
-        imageUrl: z.string().optional(),
-        imageS3Key: z.string().optional(),
+        imageUrl: z.string().nullable().optional(),
+        imageS3Key: z.string().nullable().optional(),
         attachments: z.string().optional(),
         groupCalendar: z.string().optional(),
         expenses: z.string().optional(),
@@ -152,7 +244,13 @@ export const studyCardsRouter = createTRPCRouter({
       const { id, ...updates } = input;
 
       const existingCard = await ctx.db
-        .select({ id: studyCards.id, title: studyCards.title, imageS3Key: studyCards.imageS3Key })
+        .select({
+          id: studyCards.id,
+          title: studyCards.title,
+          imageS3Key: studyCards.imageS3Key,
+          ownerUserId: studyCards.ownerUserId,
+          visibility: studyCards.visibility,
+        })
         .from(studyCards)
         .where(eq(studyCards.id, id))
         .limit(1);
@@ -163,6 +261,21 @@ export const studyCardsRouter = createTRPCRouter({
         throw new TRPCError({
           code: "NOT_FOUND",
           message: "Study card not found",
+        });
+      }
+
+      const access = await resolveCardAccess(
+        {
+          ownerUserId: currentCard.ownerUserId,
+          visibility: currentCard.visibility,
+        },
+        { userId: ctx.userId, email: ctx.userEmail, isOwner: ctx.isOwner },
+        currentCard.id,
+      );
+      if (!access.canEdit) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "You do not have edit access to this card",
         });
       }
 
@@ -181,9 +294,13 @@ export const studyCardsRouter = createTRPCRouter({
         });
       }
 
-      if (updates.imageS3Key) {
+      if ("imageS3Key" in updates) {
         const previousImageKey = currentCard.imageS3Key;
-        if (previousImageKey && previousImageKey !== updates.imageS3Key) {
+        if (
+          previousImageKey &&
+          previousImageKey !== updates.imageS3Key &&
+          previousImageKey.startsWith((env.AWS_S3_ROOT_FOLDER ?? "") + "/")
+        ) {
           await deleteS3Object(previousImageKey);
         }
       }
@@ -200,7 +317,13 @@ export const studyCardsRouter = createTRPCRouter({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const card = await ctx.db
-        .select({ id: studyCards.id, title: studyCards.title, imageS3Key: studyCards.imageS3Key })
+        .select({
+          id: studyCards.id,
+          title: studyCards.title,
+          imageS3Key: studyCards.imageS3Key,
+          ownerUserId: studyCards.ownerUserId,
+          visibility: studyCards.visibility,
+        })
         .from(studyCards)
         .where(eq(studyCards.id, input.id))
         .limit(1);
@@ -211,6 +334,21 @@ export const studyCardsRouter = createTRPCRouter({
         throw new TRPCError({
           code: "NOT_FOUND",
           message: "Study card not found",
+        });
+      }
+
+      const access = await resolveCardAccess(
+        {
+          ownerUserId: existingCard.ownerUserId,
+          visibility: existingCard.visibility,
+        },
+        { userId: ctx.userId, email: ctx.userEmail, isOwner: ctx.isOwner },
+        existingCard.id,
+      );
+      if (!access.canDelete) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Only the owner can delete this card",
         });
       }
 
